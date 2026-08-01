@@ -1,0 +1,315 @@
+/**
+ * Unified Animation System - Keyframes & Utility Classes
+ *
+ * GOAL: Every popup, modal, menu, panel, toast and button shares ONE motion
+ * language. Animations are deliberately visible (they clearly announce that
+ * something opened, closed, was pressed, is loading, or has appeared) while
+ * still feeling fast and calm.
+ *
+ * NAMING CONVENTION:
+ * - Keyframes:      anim-{name}
+ * - Utility class:  .animate-{category}-{in|out}   (e.g. .animate-modal-in)
+ *
+ * PERFORMANCE RULES:
+ * - Only animate `opacity`, `scale`, `translate`, `filter` (GPU-composited).
+ * - We use the INDIVIDUAL `scale` / `translate` properties (not the `transform`
+ *   shorthand) on purpose: many elements are centered with Tailwind's
+ *   `-translate-x-1/2` (which sets `transform`). Using the individual props lets
+ *   our animation compose with that centering instead of clobbering it.
+ * - `will-change` is set only on actively-animating classes.
+ */
+
+/* ==========================================================================
+   1. KEYFRAMES
+   ========================================================================== */
+
+/* --- Fade --- */
+@keyframes anim-fade-in  { from { opacity: 0; } to { opacity: 1; } }
+@keyframes anim-fade-out { from { opacity: 1; } to { opacity: 0; } }
+
+/* --- Backdrop (fade + blur ramp so the dim clearly grows in) --- */
+@keyframes anim-backdrop-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes anim-backdrop-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* --- Modal / Dialog: pop up with a small overshoot so it clearly "arrives" --- */
+@keyframes anim-modal-in {
+  0%   { opacity: 0; scale: 0.80; translate: 0 16px; }
+  55%  { opacity: 1; }
+  100% { opacity: 1; scale: 1;    translate: 0 0; }
+}
+@keyframes anim-modal-out {
+  0%   { opacity: 1; scale: 1;    translate: 0 0; }
+  100% { opacity: 0; scale: 0.90; translate: 0 10px; }
+}
+
+/* --- Menu / Dropdown / Context menu: grow from the top with a slide --- */
+@keyframes anim-menu-in {
+  0%   { opacity: 0; scale: 0.85; translate: 0 -12px; }
+  100% { opacity: 1; scale: 1;    translate: 0 0; }
+}
+@keyframes anim-menu-out {
+  0%   { opacity: 1; scale: 1;    translate: 0 0; }
+  100% { opacity: 0; scale: 0.94; translate: 0 -8px; }
+}
+
+/* --- Side panel (from the right) --- */
+@keyframes anim-panel-in {
+  0%   { opacity: 0; translate: 100% 0; }
+  100% { opacity: 1; translate: 0 0; }
+}
+@keyframes anim-panel-out {
+  0%   { opacity: 1; translate: 0 0; }
+  100% { opacity: 0; translate: 100% 0; }
+}
+
+/* --- Sidebar (from the left) --- */
+@keyframes anim-sidebar-in {
+  0%   { opacity: 0; translate: -100% 0; }
+  100% { opacity: 1; translate: 0 0; }
+}
+@keyframes anim-sidebar-out {
+  0%   { opacity: 1; translate: 0 0; }
+  100% { opacity: 0; translate: -100% 0; }
+}
+
+/* --- Toast / Notification (from the bottom, with an attention overshoot) --- */
+@keyframes anim-toast-in {
+  0%   { opacity: 0; scale: 0.85; translate: 0 24px; }
+  60%  { opacity: 1; scale: 1.04; translate: 0 -3px; }
+  100% { opacity: 1; scale: 1;    translate: 0 0; }
+}
+@keyframes anim-toast-out {
+  0%   { opacity: 1; scale: 1;    translate: 0 0; }
+  100% { opacity: 0; scale: 0.92; translate: 0 20px; }
+}
+
+/* --- Banner (from the top) --- */
+@keyframes anim-banner-in {
+  0%   { opacity: 0; scale: 0.94; translate: 0 -24px; }
+  60%  { opacity: 1; scale: 1.02; translate: 0 2px; }
+  100% { opacity: 1; scale: 1;    translate: 0 0; }
+}
+@keyframes anim-banner-out {
+  0%   { opacity: 1; translate: 0 0; }
+  100% { opacity: 0; translate: 0 -20px; }
+}
+
+/* --- Content / Result reveal (fade + gentle rise) --- */
+@keyframes anim-content-in {
+  0%   { opacity: 0; translate: 0 12px; }
+  100% { opacity: 1; translate: 0 0; }
+}
+
+/* --- Result pop (for content that appears after a load / action) --- */
+@keyframes anim-result-in {
+  0%   { opacity: 0; scale: 0.92; translate: 0 8px; }
+  60%  { opacity: 1; scale: 1.01; }
+  100% { opacity: 1; scale: 1;    translate: 0 0; }
+}
+
+/* --- Loading: smooth continuous spin --- */
+@keyframes anim-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* --- Loading: breathing pulse (system is preparing) --- */
+@keyframes anim-loading-pulse {
+  0%, 100% { opacity: 0.55; scale: 0.97; }
+  50%      { opacity: 1;    scale: 1; }
+}
+
+/* --- Loading: skeleton shimmer sweep --- */
+@keyframes anim-shimmer {
+  0%   { background-position: -180% 0; }
+  100% { background-position: 180% 0; }
+}
+
+/* --- Attention pulse (badges / indicators) --- */
+@keyframes anim-attention-pulse {
+  0%, 100% { scale: 1; }
+  50%      { scale: 1.06; }
+}
+
+
+/* ==========================================================================
+   2. EASING TOKENS  (kept in sync with src/animations/presets.js)
+   ========================================================================== */
+:root {
+  --ease-out-smooth: cubic-bezier(0.22, 1, 0.36, 1);   /* decelerate to a calm stop */
+  --ease-spring:     cubic-bezier(0.34, 1.56, 0.64, 1); /* slight overshoot / bounce */
+  --ease-in-fast:    cubic-bezier(0.4, 0, 1, 1);        /* accelerate away (exits) */
+}
+
+
+/* ==========================================================================
+   3. ENTER / EXIT UTILITY CLASSES
+   Durations are intentionally long enough to be noticed but still snappy.
+   ========================================================================== */
+
+/* --- Modals & Dialogs --- */
+.animate-modal-in {
+  animation: anim-modal-in 340ms var(--ease-spring) backwards;
+  transform-origin: center;
+  will-change: opacity, scale, translate;
+}
+.animate-modal-out {
+  animation: anim-modal-out 220ms var(--ease-in-fast) forwards;
+  transform-origin: center;
+  will-change: opacity, scale, translate;
+}
+
+/* --- Backdrop --- */
+.animate-backdrop-in  { animation: anim-backdrop-in  260ms var(--ease-out-smooth) backwards; }
+.animate-backdrop-out { animation: anim-backdrop-out 220ms var(--ease-in-fast)    forwards; }
+
+/* --- Menus & Dropdowns (grow from the top edge) --- */
+.animate-menu-in {
+  animation: anim-menu-in 200ms var(--ease-spring) backwards;
+  transform-origin: top center;
+  will-change: opacity, scale, translate;
+}
+.animate-menu-out {
+  animation: anim-menu-out 150ms var(--ease-in-fast) forwards;
+  transform-origin: top center;
+}
+
+/* --- Side Panels (right) --- */
+.animate-panel-in  { animation: anim-panel-in  360ms var(--ease-out-smooth) backwards; will-change: opacity, translate; }
+.animate-panel-out { animation: anim-panel-out 260ms var(--ease-in-fast)    forwards;  will-change: opacity, translate; }
+
+/* --- Sidebar (left) --- */
+.animate-sidebar-in  { animation: anim-sidebar-in  340ms var(--ease-out-smooth) backwards; will-change: opacity, translate; }
+.animate-sidebar-out { animation: anim-sidebar-out 260ms var(--ease-in-fast)    forwards;  will-change: opacity, translate; }
+
+/* --- Toast / Notifications --- */
+.animate-toast-in  { animation: anim-toast-in  420ms var(--ease-spring)   backwards; will-change: opacity, scale, translate; }
+.animate-toast-out { animation: anim-toast-out 240ms var(--ease-in-fast)  forwards;  will-change: opacity, scale, translate; }
+
+/* --- Banner (top) --- */
+.animate-banner-in  { animation: anim-banner-in  400ms var(--ease-spring)  backwards; will-change: opacity, scale, translate; }
+.animate-banner-out { animation: anim-banner-out 240ms var(--ease-in-fast) forwards; }
+
+/* --- Content reveal (view/workspace switch) --- */
+.animate-content-in { animation: anim-content-in 320ms var(--ease-out-smooth) backwards; }
+
+/* --- Result reveal (content that appears after a load / action) --- */
+.animate-result-in { animation: anim-result-in 360ms var(--ease-spring) backwards; }
+
+/* --- Plain fade --- */
+.animate-fade-in  { animation: anim-fade-in  260ms var(--ease-out-smooth) backwards; }
+.animate-fade-out { animation: anim-fade-out 200ms var(--ease-in-fast)    forwards; }
+
+/* --- Attention pulse --- */
+.animate-attention { animation: anim-attention-pulse 1.8s ease-in-out infinite; }
+
+
+/* ==========================================================================
+   4. LOADING STATES
+   ========================================================================== */
+
+/* Smooth spinner. Usage: <span class="anim-spinner" /> */
+.anim-spinner {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  border-radius: 9999px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: anim-spin 650ms linear infinite;
+}
+
+/* Breathing "processing" hint for content that is being prepared */
+.animate-loading-pulse { animation: anim-loading-pulse 1.1s ease-in-out infinite; }
+
+/* Skeleton shimmer block */
+.animate-shimmer {
+  background-image: linear-gradient(
+    100deg,
+    rgba(148, 163, 184, 0.12) 30%,
+    rgba(148, 163, 184, 0.28) 50%,
+    rgba(148, 163, 184, 0.12) 70%
+  );
+  background-size: 220% 100%;
+  animation: anim-shimmer 1.4s ease-in-out infinite;
+}
+
+
+/* ==========================================================================
+   5. BUTTON PRESS FEEDBACK
+   Every <button> gets an instant, clearly-felt press response.
+   Only `scale` + `filter` animate (GPU-composited, no layout thrashing).
+   ========================================================================== */
+button {
+  transition: scale 90ms var(--ease-out-smooth),
+              filter 90ms ease,
+              background-color 150ms ease,
+              box-shadow 150ms ease,
+              opacity 150ms ease;
+}
+button:active {
+  scale: 0.93;
+  filter: brightness(0.92);
+}
+
+/* Disabled buttons must not react */
+button:disabled:active,
+button[aria-disabled="true"]:active {
+  scale: none;
+  filter: none;
+}
+
+/* Stronger press for primary action buttons */
+.btn-press:active     { scale: 0.92; filter: brightness(0.9); }
+/* Gentler press for small icon-only buttons */
+.btn-press-sm:active  { scale: 0.90; }
+
+/* Links styled as buttons react too */
+a[role="button"] {
+  transition: scale 90ms var(--ease-out-smooth), filter 90ms ease, background-color 150ms ease;
+}
+a[role="button"]:active { scale: 0.94; filter: brightness(0.94); }
+
+
+/* ==========================================================================
+   6. REDUCED MOTION
+   Respect the user's OS preference: keep elements visible, drop the motion.
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  .animate-modal-in, .animate-modal-out,
+  .animate-backdrop-in, .animate-backdrop-out,
+  .animate-menu-in, .animate-menu-out,
+  .animate-panel-in, .animate-panel-out,
+  .animate-sidebar-in, .animate-sidebar-out,
+  .animate-toast-in, .animate-toast-out,
+  .animate-banner-in, .animate-banner-out,
+  .animate-content-in, .animate-result-in,
+  .animate-fade-in, .animate-fade-out,
+  .animate-attention, .animate-loading-pulse, .animate-shimmer {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
+
+  /* Entrances must end fully visible & un-transformed */
+  .animate-modal-in, .animate-menu-in, .animate-panel-in, .animate-sidebar-in,
+  .animate-toast-in, .animate-banner-in, .animate-content-in, .animate-result-in,
+  .animate-fade-in {
+    opacity: 1 !important;
+    scale: none !important;
+    translate: none !important;
+  }
+
+  button:active, a[role="button"]:active,
+  .btn-press:active, .btn-press-sm:active {
+    scale: none !important;
+    filter: none !important;
+  }
+
+  /* Spinner still needs to convey "working", just slower & subtler */
+  .anim-spinner { animation-duration: 900ms !important; }
+}
