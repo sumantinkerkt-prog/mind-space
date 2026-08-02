@@ -25,6 +25,7 @@ import { useAnimatedMount } from './animations';
 import { parseRouteIntent, buildEditorPath, buildViewPath } from './routing/useRouteIntent';
 import { isFirebaseConfigured } from './firebase';
 import { validateWorkspaces } from './workspaceValidator';
+import { applyNodeUpdate, collectCloneInstances } from './nodeUpdate';
 import { uploadImage as uploadImageToStorage, deleteImage as deleteImageFromStorage, deleteWorkspaceImages } from './imageStorageService';
 import {
   saveProjectMeta,
@@ -6402,48 +6403,23 @@ export default function WorkflowApp() {
 
   const updateNode = (id, updates) => {
     if (isPreviewMode) return;
-    // Single atomic state update that handles both the direct node edit
-    // and cross-workspace clone propagation in one pass
-    const syncFields = {};
-    if (updates.title !== undefined) syncFields.title = updates.title;
-    if (updates.content !== undefined) syncFields.content = updates.content;
-    const shouldPropagate = Object.keys(syncFields).length > 0;
-
-    setWorkspaces(prev => {
-      // Find the source id for clone propagation
-      let sourceId = null;
-      if (shouldPropagate) {
-        for (const ws of prev) {
-          const found = ws.nodes.find(n => n.id === id);
-          if (found) {
-            sourceId = found.cloneSourceId || found.id;
-            break;
-          }
-        }
-      }
-
-      return prev.map(ws => {
-        const isActiveWs = ws.id === activeTab;
-        const hasEditedNode = ws.nodes.some(n => n.id === id);
-        const hasRelatedClone = shouldPropagate && sourceId && ws.nodes.some(n =>
-          n.id === sourceId || n.cloneSourceId === sourceId
+    // Bug 24 fix: the edit is scoped to the active workspace, and clone
+    // propagation follows explicit cloneSourceId relationships instead of bare
+    // matching ids. Logic lives in ./nodeUpdate.js so it can be unit tested.
+    setWorkspaces(prev => applyNodeUpdate(prev, {
+      id,
+      updates,
+      activeWorkspaceId: activeTab,
+      computeLayout,
+      onAmbiguity: ({ sourceId, matchCount }) => {
+        // Not DEV-gated on purpose: duplicate card ids are the precondition for
+        // real data loss, so this must be visible in the shipped app too.
+        console.warn(
+          `[updateNode] Card id "${sourceId}" exists ${matchCount} times in this project. ` +
+          `Clone sync to the original was skipped to avoid editing the wrong card.`
         );
-
-        if (!isActiveWs && !hasEditedNode && !hasRelatedClone) return ws;
-
-        const updatedNodes = ws.nodes.map(n => {
-          // Apply direct update to the edited node
-          if (n.id === id) return { ...n, ...updates };
-          // Propagate title/content to related clones
-          if (shouldPropagate && sourceId && (n.id === sourceId || n.cloneSourceId === sourceId)) {
-            return { ...n, ...syncFields };
-          }
-          return n;
-        });
-
-        return { ...ws, nodes: updatedNodes, groups: computeLayout(ws.groups, updatedNodes) };
-      });
-    });
+      }
+    }));
   };
 
   const deleteNode = (id) => {
@@ -8919,17 +8895,10 @@ export default function WorkflowApp() {
             });
           });
 
-          // Get instances for the selected source from ALL workspaces
-          const cloneInstances = [];
-          if (selectedCloneSourceId) {
-            workspaces.forEach(ws => {
-              ws.nodes.forEach(n => {
-                if (n.id === selectedCloneSourceId || n.cloneSourceId === selectedCloneSourceId) {
-                  cloneInstances.push({ ...n, _workspaceId: ws.id, _workspaceName: ws.name, _edges: ws.edges });
-                }
-              });
-            });
-          }
+          // Get instances for the selected source from ALL workspaces.
+          // Bug 24 companion fix: an unrelated card that merely shares the id is
+          // no longer listed as a clone instance.
+          const { instances: cloneInstances } = collectCloneInstances(workspaces, selectedCloneSourceId);
 
           return (
             <>
