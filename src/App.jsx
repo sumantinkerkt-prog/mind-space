@@ -26,6 +26,7 @@ import { parseRouteIntent, buildEditorPath, buildViewPath } from './routing/useR
 import { isFirebaseConfigured } from './firebase';
 import { validateWorkspaces } from './workspaceValidator';
 import { applyNodeUpdate, collectCloneInstances } from './nodeUpdate';
+import { DEFAULT_NEXT_ID, deriveNextId } from './cardId';
 import { uploadImage as uploadImageToStorage, deleteImage as deleteImageFromStorage, deleteWorkspaceImages } from './imageStorageService';
 import {
   saveProjectMeta,
@@ -1157,7 +1158,7 @@ export default function WorkflowApp() {
                       id: proj.id, name: proj.name || 'Untitled', description: proj.description || '',
                       password: preservedPassword || null, thumbnail: proj.thumbnail || null,
                       lastModified: proj.lastModified || Date.now(), activeTab: proj.activeTab || wsIds[0] || '',
-                      nextId: proj.nextId || 1, reminders: proj.reminders || [],
+                      nextId: proj.nextId || DEFAULT_NEXT_ID, reminders: proj.reminders || [],
                       workspaceIds: proj.workspaceIds || wsIds, schemaVersion: 2
                     });
                   }
@@ -1293,7 +1294,7 @@ export default function WorkflowApp() {
                 id: proj.id, name: proj.name || 'Untitled', description: proj.description || '',
                 password: resolvedPassword, thumbnail: proj.thumbnail || null,
                 lastModified: proj.lastModified || Date.now(), activeTab: proj.activeTab || wsIds[0] || '',
-                nextId: proj.nextId || 1, reminders: proj.reminders || [],
+                nextId: proj.nextId || DEFAULT_NEXT_ID, reminders: proj.reminders || [],
                 workspaceIds: wsIds, schemaVersion: 2
               });
               for (const ws of (proj.workspaces || [])) {
@@ -1508,6 +1509,42 @@ export default function WorkflowApp() {
   useEffect(() => {
     stateRef.current = { workspaces, activeTab, nextId };
   }, [workspaces, activeTab, nextId]);
+
+  // --- Card id allocation (Bug 16, counter containment) ---------------------
+  // Ids come from a cursor that only ever moves FORWARD and is continually
+  // raised above every live card id. That single invariant defeats all five
+  // regression paths: the 1-vs-10 default mismatch, a lost metadata write, undo
+  // restoring an old counter, a stale cloud adoption, and two creations landing
+  // in the same React batch. See ./cardId.js.
+  const idCursorRef = useRef(DEFAULT_NEXT_ID);
+
+  useEffect(() => {
+    const derived = deriveNextId(workspaces, nextId);
+    if (derived > idCursorRef.current) idCursorRef.current = derived;
+  }, [workspaces, nextId]);
+
+  // Reserve `count` consecutive ids and return the first number. Because the
+  // cursor is a ref, it advances synchronously -- two calls in one batch can
+  // never receive the same number.
+  const reserveCardIds = useCallback((count = 1) => {
+    const derived = deriveNextId(stateRef.current && stateRef.current.workspaces, nextId);
+    if (derived > idCursorRef.current) idCursorRef.current = derived;
+    const start = idCursorRef.current;
+    idCursorRef.current = start + Math.max(1, count);
+    setNextId(idCursorRef.current);
+    return start;
+  }, [nextId]);
+
+  const allocateCardId = useCallback(() => String(reserveCardIds(1)), [reserveCardIds]);
+
+  // For bulk operations that walk a local counter (paste, duplicate, import):
+  // publish where that walk ended so the cursor cannot hand the range out twice.
+  const commitIdCursor = useCallback((nextFree) => {
+    const value = Number(nextFree);
+    if (!Number.isFinite(value)) return;
+    if (value > idCursorRef.current) idCursorRef.current = value;
+    setNextId(idCursorRef.current);
+  }, []);
 
   // Keep activeProjectIdRef in sync for debounced callbacks (avoids stale closures)
   useEffect(() => {
@@ -2851,7 +2888,7 @@ export default function WorkflowApp() {
 
       const newNode = {
         ...clipData.node,
-        id: nextId.toString(),
+        id: allocateCardId(),
         x: pasteX,
         y: pasteY,
         groupId: null,
@@ -2904,7 +2941,6 @@ export default function WorkflowApp() {
         });
       }
 
-      setNextId(prev => prev + 1);
       localStorage.removeItem('nexus-clipboard');
     } catch (e) {
       // Invalid clipboard data, ignore
@@ -2996,7 +3032,7 @@ export default function WorkflowApp() {
       }
 
       // Generate new IDs for all groups, nodes, and edges
-      let idCounter = nextId;
+      let idCounter = reserveCardIds(1);
       const groupIdMap = {};
       const nodeIdMap = {};
 
@@ -3079,7 +3115,7 @@ export default function WorkflowApp() {
         });
       }
 
-      setNextId(idCounter);
+      commitIdCursor(idCounter);
       localStorage.removeItem('nexus-clipboard-group');
     } catch (e) {
       // Invalid clipboard data, ignore
@@ -3286,7 +3322,7 @@ export default function WorkflowApp() {
       pasteOffsetRef.current += 20;
 
       // Generate new IDs
-      let idCounter = nextId;
+      let idCounter = reserveCardIds(1);
       const groupIdMap = {};
       const nodeIdMap = {};
       const imageIdMap = {};
@@ -3417,7 +3453,7 @@ export default function WorkflowApp() {
         });
       }
 
-      setNextId(idCounter);
+      commitIdCursor(idCounter);
 
       // Auto-select all newly pasted objects
       const newSelectedIds = [
@@ -4103,7 +4139,7 @@ export default function WorkflowApp() {
     const source = workspaces.find(w => w.id === wsId);
     if (!source) return;
     const newWsId = generateId();
-    let idCounter = nextId;
+    let idCounter = reserveCardIds(1);
     const nodeIdMap = {};
     const groupIdMap = {};
     const pinIdMap = {};
@@ -4174,7 +4210,7 @@ export default function WorkflowApp() {
     // Consistent with create: the duplicated workspace appears in the Workspace
     // Manager list without force-switching the canvas. The user clicks it to open.
     setWorkspaces(prev => [...prev, newWorkspace]);
-    setNextId(idCounter);
+    commitIdCursor(idCounter);
 
     // Save the new workspace to per-workspace keys and update project metadata
     saveWorkspaceToLocal(activeProjectId, newWsId, {
@@ -5085,7 +5121,7 @@ export default function WorkflowApp() {
                 id: proj.id, name: proj.name || 'Untitled', description: proj.description || '',
                 password: proj.password || null, thumbnail: proj.thumbnail || null,
                 lastModified: proj.lastModified || Date.now(), activeTab: proj.activeTab || wsIds[0] || '',
-                nextId: proj.nextId || 1, reminders: proj.reminders || [],
+                nextId: proj.nextId || DEFAULT_NEXT_ID, reminders: proj.reminders || [],
                 workspaceIds: wsIds, schemaVersion: 2
               });
               for (const ws of (proj.workspaces || [])) {
@@ -5097,7 +5133,7 @@ export default function WorkflowApp() {
               saveTasks(proj.id, { tasks: proj.tasks || [], taskGroups: proj.taskGroups || [] });
               // Fire-and-forget Firestore sync
               if (isFirebaseConfigured()) {
-                saveProjectToFirestore(proj.id, { id: proj.id, name: proj.name || 'Untitled', description: proj.description || '', thumbnail: proj.thumbnail || null, lastModified: proj.lastModified || Date.now(), activeTab: proj.activeTab || wsIds[0] || '', nextId: proj.nextId || 1, reminders: proj.reminders || [] }).catch(() => {});
+                saveProjectToFirestore(proj.id, { id: proj.id, name: proj.name || 'Untitled', description: proj.description || '', thumbnail: proj.thumbnail || null, lastModified: proj.lastModified || Date.now(), activeTab: proj.activeTab || wsIds[0] || '', nextId: proj.nextId || DEFAULT_NEXT_ID, reminders: proj.reminders || [] }).catch(() => {});
                 ensureWorkspaceIds(proj.id, wsIds).catch(() => {});
                 for (const ws of (proj.workspaces || [])) {
                   saveWorkspaceToFirestore(proj.id, ws.id, { id: ws.id, name: ws.name || 'Workspace', nodes: ws.nodes || [], edges: ws.edges || [], groups: ws.groups || [], pins: ws.pins || [], images: ws.images || [], lastModified: Date.now() }).catch(() => {});
@@ -5230,7 +5266,7 @@ export default function WorkflowApp() {
     }
 
     // Generate new IDs and remap references
-    let currentId = nextId;
+    let currentId = reserveCardIds(1);
     const nodeIdMap = {};
     const groupIdMap = {};
 
@@ -5284,7 +5320,7 @@ export default function WorkflowApp() {
       };
     });
 
-    setNextId(currentId);
+    commitIdCursor(currentId);
     setSelectedNodeIds(newNodes.map(n => n.id));
     setShowPartialImportDialog(false);
     setPartialImportData(null);
@@ -5949,7 +5985,7 @@ export default function WorkflowApp() {
     }
 
     const newNode = {
-      id: nextId.toString(),
+      id: allocateCardId(),
       workspaceId: activeTab,
       x: targetX, y: targetY,
       title: 'New Card', content: '', theme: 'blue',
@@ -5963,7 +5999,6 @@ export default function WorkflowApp() {
         groups: computeLayout(ws.groups, updatedNodes)
       };
     });
-    setNextId(prev => prev + 1);
   };
 
   const addNodeRef = useRef(addNode);
@@ -6281,7 +6316,7 @@ export default function WorkflowApp() {
     if (!target) return;
 
     const dup = {
-      id: nextId.toString(),
+      id: allocateCardId(),
       workspaceId: activeTab,
       x: target.x + 40,
       y: target.y + 40,
@@ -6300,7 +6335,6 @@ export default function WorkflowApp() {
         groups: computeLayout(ws.groups, updatedNodes)
       };
     });
-    setNextId(prev => prev + 1);
   };
 
   const cloneNode = (nodeId) => {
@@ -6313,7 +6347,7 @@ export default function WorkflowApp() {
     const sourceId = target.cloneSourceId || target.id;
 
     const clone = {
-      id: nextId.toString(),
+      id: allocateCardId(),
       workspaceId: activeTab,
       x: target.x + 60,
       y: target.y + 60,
@@ -6331,7 +6365,6 @@ export default function WorkflowApp() {
         groups: computeLayout(ws.groups, updatedNodes)
       };
     });
-    setNextId(prev => prev + 1);
   };
 
   const cloneNodeToWorkspace = (nodeId, targetWorkspaceId) => {
@@ -6350,7 +6383,7 @@ export default function WorkflowApp() {
     const cloneY = 200 + 60 * existingClonesCount;
 
     const clone = {
-      id: nextId.toString(),
+      id: allocateCardId(),
       x: cloneX,
       y: cloneY,
       title: target.title,
@@ -6366,7 +6399,6 @@ export default function WorkflowApp() {
       const updatedNodes = [...ws.nodes, clone];
       return { ...ws, nodes: updatedNodes, groups: computeLayout(ws.groups, updatedNodes) };
     }));
-    setNextId(prev => prev + 1);
   };
 
   const disconnectNodeLinks = (nodeId) => {
@@ -9393,7 +9425,7 @@ export default function WorkflowApp() {
               <button onClick={() => { if (isPreviewMode) return; takeSnapshot(); const deletedImages = (activeWs?.images || []).filter(img => selectedNodeIds.includes(img.id)); const deletedImageIds = deletedImages.map(img => img.id); updateActiveWorkspace(ws => { const filtered = ws.nodes.filter(n => !selectedNodeIds.includes(n.id)); const filteredGroups = ws.groups.filter(g => !selectedNodeIds.includes(g.id)); const filteredImages = (ws.images || []).filter(img => !selectedNodeIds.includes(img.id)); const filteredEdges = ws.edges.filter(e => !selectedNodeIds.includes(e.source) && !selectedNodeIds.includes(e.target)); return { nodes: filtered, edges: filteredEdges, groups: computeLayout(filteredGroups, filtered), images: filteredImages }; }); if (deletedImageIds.length > 0) { const allWorkspaces = stateRef.current.workspaces || []; const safeToDeleteIds = deletedImages.filter(delImg => { if (!delImg.url) return false; return !allWorkspaces.some(ws => (ws.images || []).some(img => img.id !== delImg.id && img.url === delImg.url)); }).map(img => img.id); if (safeToDeleteIds.length > 0) { deleteWorkspaceImages(activeProjectId, activeTab, safeToDeleteIds); } } setSelectedNodeIds([]); setSelectionMenuOpen(false); }} className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors w-full text-left">
                 <Trash2 className="w-4 h-4" /> Delete
               </button>
-              <button onClick={() => { if (isPreviewMode) return; takeSnapshot(); const selectedNodes = nodes.filter(n => selectedNodeIds.includes(n.id)); const selectedEdges = edges.filter(e => selectedNodeIds.includes(e.source) && selectedNodeIds.includes(e.target)); const selectedImages = (activeWs?.images || []).filter(img => selectedNodeIds.includes(img.id)); let currentId = nextId; const idMap = {}; const newNodes = selectedNodes.map(n => { const newId = currentId.toString(); idMap[n.id] = newId; currentId++; return { ...n, id: newId, x: n.x + 40, y: n.y + 40, cloneSourceId: null, workspaceId: activeTab }; }); const newEdges = selectedEdges.map(e => ({ id: `e-${currentId++}`, source: idMap[e.source] || e.source, target: idMap[e.target] || e.target, workspaceId: activeTab })); const newImages = selectedImages.map(img => ({ ...img, id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, x: img.x + 40, y: img.y + 40, workspaceId: activeTab })); updateActiveWorkspace(ws => { const updatedNodes = [...ws.nodes, ...newNodes]; return { nodes: updatedNodes, edges: [...ws.edges, ...newEdges], groups: computeLayout(ws.groups, updatedNodes), images: [...(ws.images || []), ...newImages] }; }); setNextId(currentId); setSelectedNodeIds([...newNodes.map(n => n.id), ...newImages.map(img => img.id)]); setSelectionMenuOpen(false); }} className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors w-full text-left">
+              <button onClick={() => { if (isPreviewMode) return; takeSnapshot(); const selectedNodes = nodes.filter(n => selectedNodeIds.includes(n.id)); const selectedEdges = edges.filter(e => selectedNodeIds.includes(e.source) && selectedNodeIds.includes(e.target)); const selectedImages = (activeWs?.images || []).filter(img => selectedNodeIds.includes(img.id)); let currentId = reserveCardIds(1); const idMap = {}; const newNodes = selectedNodes.map(n => { const newId = currentId.toString(); idMap[n.id] = newId; currentId++; return { ...n, id: newId, x: n.x + 40, y: n.y + 40, cloneSourceId: null, workspaceId: activeTab }; }); const newEdges = selectedEdges.map(e => ({ id: `e-${currentId++}`, source: idMap[e.source] || e.source, target: idMap[e.target] || e.target, workspaceId: activeTab })); const newImages = selectedImages.map(img => ({ ...img, id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, x: img.x + 40, y: img.y + 40, workspaceId: activeTab })); updateActiveWorkspace(ws => { const updatedNodes = [...ws.nodes, ...newNodes]; return { nodes: updatedNodes, edges: [...ws.edges, ...newEdges], groups: computeLayout(ws.groups, updatedNodes), images: [...(ws.images || []), ...newImages] }; }); commitIdCursor(currentId); setSelectedNodeIds([...newNodes.map(n => n.id), ...newImages.map(img => img.id)]); setSelectionMenuOpen(false); }} className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors w-full text-left">
                 <Copy className="w-4 h-4" /> Duplicate
               </button>
               <button onClick={() => { exportSelectedNodes(selectedNodeIds); setSelectionMenuOpen(false); }} className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 rounded-lg transition-colors w-full text-left" id="export-selected-btn">
