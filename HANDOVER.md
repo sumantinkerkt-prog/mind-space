@@ -37,9 +37,8 @@ branch `fix/bug-24-workspace-scoped-card-updates` — **open, not merged.**
 | `372d42a` | `.kiro/steering/remediation-plan.md` — auto-loading rules |
 | `45306b5` | Fix 2 — Bug 16 counter, ids derived from live data |
 
-The PR *description* only describes Fix 1, because the available tools can create
-a PR but not edit one and `gh` is unauthenticated. The commit messages are the
-real record.
+The PR title and body describe both fixes, the testing, the audit result and what
+was deliberately left out.
 
 New files: `src/nodeUpdate.js`, `src/nodeUpdate.test.js`, `src/cardId.js`,
 `src/cardId.test.js`, `audit/idAudit.mjs`, `.gitignore` (repo had none).
@@ -147,7 +146,13 @@ If the app opens empty or says offline: **stop, don't edit, close the tab.**
 
 - `npm` is not on the PATH. Prefix with
   `export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use 22 >/dev/null`.
-- `gh` is installed but not authenticated — PR bodies cannot be edited.
+- `gh auth status` reports a login failure — **cosmetic, ignore it.** Auth works
+  through a credential helper. `gh api` works; the GraphQL-backed commands
+  (`gh pr`, `gh issue`) do not. Edit a PR with
+  `gh api repos/{owner}/{repo}/pulls/{n} -X PATCH -f title=... -F body=@file`.
+- `git push` with no arguments failed (HTTP 400 against the stored gateway
+  remote). Pushing to the explicit URL worked:
+  `git push https://github.com/{owner}/{repo}.git HEAD:{branch}`.
 - The sandbox checkout corrupted once mid-session (`fatal: bad object HEAD`).
   Push early; re-clone to recover.
 - Images are inline base64 inside workspace documents, not Firebase Storage, so

@@ -48,8 +48,10 @@ Then stop and let the owner use the app for 2-3 weeks before anything else.
 - **`npm` is not on the PATH by default.** Prefix commands with
   `export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use 22 >/dev/null`
   or they fail with "npm: command not found".
-- The `gh` CLI is present but **not authenticated**, so PR titles and
-  descriptions cannot be edited. Put the real explanation in commit messages.
+- `gh auth status` reports a login failure — cosmetic, auth works via credential
+  helper. Use `gh api` (REST); GraphQL-backed commands like `gh pr` fail.
+- Bare `git push` failed with HTTP 400 against the stored gateway remote. Use
+  `git push https://github.com/{owner}/{repo}.git HEAD:{branch}`.
 - The sandbox checkout was corrupted once mid-session (`fatal: bad object HEAD`,
   files vanished). Push early; re-clone to recover.
 - Images are stored as inline base64 in workspace documents, not Firebase
