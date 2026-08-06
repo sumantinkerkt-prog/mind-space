@@ -24,8 +24,8 @@ Only these six are in scope. Everything else is explicitly deferred.
 | # | Bug(s) | What | Status |
 |---|---|---|---|
 | 1 | 24 | Scope card edits to the active workspace; clone sync via explicit `cloneSourceId` only | **Done** — PR #2, unmerged |
-| 2 | 16 (counter subset only) | Unify the `nextId` default, derive the counter from the highest live card id before every allocation, fix `addNode`'s same-batch closure read | **Next** |
-| 3 | 19 (+ shape guard from 58) | Project-wide duplicate-id and dangling-clone check, non-throwing, **visible in production** (not DEV-gated) | Not started |
+| 2 | 16 (counter subset only) | Unify the `nextId` default, derive the counter from the highest live card id before every allocation, fix `addNode`'s same-batch closure read | **Done** — PR #2, unmerged |
+| 3 | 19 (+ shape guard from 58) | Project-wide duplicate-id and dangling-clone check, non-throwing, **visible in production** (not DEV-gated) | **Next** — new branch |
 | 4 | 42 | Distinguish "no data" from "couldn't read"; never write or upload defaults after an indeterminate read | Not started |
 | 5 | 30 + minimal 43 | `guardedFirestoreSave` must return a real promise; route queued failures to `enqueueFailedWrite`; `confirmSynced` clears dirty only if the confirmed content hash still matches current local content | Not started |
 | 6 | 47 (four leaks only) | Block writes in reference sessions: reminder scheduler metadata, retry-queue execution, canvas-switch local save/flush, `PinPanel` raw setters | Not started |
@@ -42,6 +42,18 @@ Then stop and let the owner use the app for 2-3 weeks before anything else.
   undo already works via one snapshot per edit session. See Doc 05 corrections.
 - **Do not "fix" Bug 15 by adding `workspaceIds` to the metadata fingerprint.**
   The metadata writer strips it on purpose.
+
+## Environment quirks
+
+- **`npm` is not on the PATH by default.** Prefix commands with
+  `export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use 22 >/dev/null`
+  or they fail with "npm: command not found".
+- The `gh` CLI is present but **not authenticated**, so PR titles and
+  descriptions cannot be edited. Put the real explanation in commit messages.
+- The sandbox checkout was corrupted once mid-session (`fatal: bad object HEAD`,
+  files vanished). Push early; re-clone to recover.
+- Images are stored as inline base64 in workspace documents, not Firebase
+  Storage, so the Storage-ownership bugs (52, 54) do not apply to current data.
 
 ## Delivery conventions
 
