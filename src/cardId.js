@@ -50,7 +50,14 @@ export function highestNumericCardId(workspaces) {
   let highest = 0;
   if (!Array.isArray(workspaces)) return highest;
   for (const ws of workspaces) {
-    for (const node of ((ws && ws.nodes) || [])) {
+    // `ws.nodes` must be checked with Array.isArray, not just for truthiness:
+    // `for (const n of {})` throws "object is not iterable". A half-written
+    // import or a hand-edited file can leave `nodes` as an object, and this
+    // function runs on the live allocation path (deriveNextId -> reserveCardIds
+    // -> every card creation), so throwing here would break adding cards
+    // altogether rather than degrading. Bug 58.
+    const nodes = (ws && Array.isArray(ws.nodes)) ? ws.nodes : [];
+    for (const node of nodes) {
       if (!node) continue;
       const num = Number(node.id);
       if (Number.isFinite(num) && num > highest) highest = num;
