@@ -1,0 +1,283 @@
+{
+  "_note": "Card/edge/group ids transcribed by hand from the owner's pasted project export (Aug 2026). Base64 image payloads and card text were omitted - only identity fields are kept, which is all the audit reads. Used to cross-check the manual analysis.",
+  "name": "owner export (transcribed)",
+  "activeTab": "5d92362f-5bd0-442a-a0ca-00e3389930eb",
+  "nextId": 129,
+  "workspaces": [
+    {
+      "id": "ws-1",
+      "name": "Product Launch Roadmap",
+      "nodes": [
+        { "id": "1", "groupId": "g-1", "cloneSourceId": null },
+        { "id": "2", "groupId": "g-1", "cloneSourceId": null },
+        { "id": "3", "groupId": "g-2", "cloneSourceId": null },
+        { "id": "4", "groupId": null, "cloneSourceId": null }
+      ],
+      "edges": [
+        { "id": "e1", "source": "1", "target": "3" },
+        { "id": "e2", "source": "2", "target": "3" },
+        { "id": "e3", "source": "3", "target": "4" }
+      ],
+      "groups": [
+        { "id": "g-1", "parentGroupId": null },
+        { "id": "g-2", "parentGroupId": null }
+      ],
+      "pins": [],
+      "images": []
+    },
+    {
+      "id": "5d92362f-5bd0-442a-a0ca-00e3389930eb",
+      "name": "hetercdtea",
+      "nodes": [
+        { "id": "18", "groupId": "g-1784002079183", "cloneSourceId": null },
+        { "id": "21", "groupId": "g-1784002079183", "cloneSourceId": null },
+        { "id": "24", "groupId": "g-1784002079183", "cloneSourceId": null },
+        { "id": "25", "groupId": "g-1784002079183", "cloneSourceId": null },
+        { "id": "26", "groupId": "g-1784002079183", "cloneSourceId": null },
+        { "id": "28", "groupId": "g-1784002079183", "cloneSourceId": null },
+        { "id": "29", "groupId": "g-1784002079183", "cloneSourceId": null },
+        { "id": "23", "groupId": "g-1784002079183", "cloneSourceId": null },
+        { "id": "30", "groupId": null, "cloneSourceId": "16" },
+        { "id": "50", "groupId": "g-1784002079183", "cloneSourceId": "4" },
+        { "id": "16", "groupId": "g-1784002079183", "cloneSourceId": null },
+        { "id": "22", "groupId": "g-1784002079183", "cloneSourceId": null },
+        { "id": "17", "groupId": null, "cloneSourceId": null },
+        { "id": "19", "groupId": null, "cloneSourceId": null },
+        { "id": "80", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "81", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "82", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "83", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "84", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "85", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "86", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "87", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "88", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "89", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "90", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "94", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "95", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "96", "groupId": "g-1784211082532-79", "cloneSourceId": null },
+        { "id": "94", "groupId": null, "cloneSourceId": null },
+        { "id": "95", "groupId": null, "cloneSourceId": null },
+        { "id": "96", "groupId": null, "cloneSourceId": null },
+        { "id": "101", "groupId": null, "cloneSourceId": null },
+        { "id": "102", "groupId": null, "cloneSourceId": null },
+        { "id": "103", "groupId": null, "cloneSourceId": null },
+        { "id": "101", "groupId": null, "cloneSourceId": null },
+        { "id": "102", "groupId": null, "cloneSourceId": null },
+        { "id": "103", "groupId": null, "cloneSourceId": null },
+        { "id": "27", "groupId": "g-1784002079183", "cloneSourceId": null },
+        { "id": "20", "groupId": "g-1784002079183", "cloneSourceId": null }
+      ],
+      "edges": [
+        { "id": "e-1784002133452", "source": "27", "target": "20" },
+        { "id": "e-1784002139332", "source": "19", "target": "g-1784002079183" },
+        { "id": "e-1784002161556", "source": "g-1784002079183", "target": "29" },
+        { "id": "e-1784085869879", "source": "17", "target": "g-1784002079183" },
+        { "id": "e-1784085870488", "target": "g-1784002079183" },
+        { "id": "e-1784211082532-97", "source": "89", "target": "96" }
+      ],
+      "groups": [
+        { "id": "g-1784002079183", "parentGroupId": null },
+        { "id": "g-1784211082532-79", "parentGroupId": null }
+      ],
+      "pins": [
+        { "id": "pin-1784085965902" },
+        { "id": "pin-task-1784124484795-ie1mld" }
+      ],
+      "images": [{ "id": "img-1784002165825-8md8cp", "groupId": null }]
+    },
+    {
+      "id": "8ab883d9-4fc3-4660-b829-3d8b31f0e413",
+      "name": "jdk",
+      "nodes": [
+        { "id": "52", "groupId": "g-1784124692361-51", "cloneSourceId": null },
+        { "id": "53", "groupId": "g-1784124692361-51", "cloneSourceId": null },
+        { "id": "54", "groupId": "g-1784124692361-51", "cloneSourceId": null },
+        { "id": "55", "groupId": "g-1784124692361-51", "cloneSourceId": null },
+        { "id": "56", "groupId": "g-1784124692361-51", "cloneSourceId": null },
+        { "id": "57", "groupId": "g-1784124692361-51", "cloneSourceId": null },
+        { "id": "61", "groupId": "g-1784124692361-51", "cloneSourceId": null },
+        { "id": "62", "groupId": "g-1784124692361-51", "cloneSourceId": null },
+        { "id": "67", "groupId": "g-1784172643185-62", "cloneSourceId": null },
+        { "id": "68", "groupId": "g-1784172643185-62", "cloneSourceId": null },
+        { "id": "69", "groupId": "g-1784172643185-62", "cloneSourceId": null },
+        { "id": "70", "groupId": "g-1784172643185-62", "cloneSourceId": null },
+        { "id": "71", "groupId": "g-1784172643185-62", "cloneSourceId": null },
+        { "id": "72", "groupId": "g-1784172643185-62", "cloneSourceId": null },
+        { "id": "73", "groupId": "g-1784172643185-62", "cloneSourceId": null },
+        { "id": "74", "groupId": "g-1784172643185-62", "cloneSourceId": null },
+        { "id": "75", "groupId": null, "cloneSourceId": null },
+        { "id": "76", "groupId": "g-1784172643185-62", "cloneSourceId": null },
+        { "id": "77", "groupId": "g-1784172643185-62", "cloneSourceId": null },
+        { "id": "81", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "82", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "83", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "84", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "85", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "86", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "87", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "88", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "89", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "92", "groupId": null, "cloneSourceId": null },
+        { "id": "59", "groupId": "g-1784124692361-51", "cloneSourceId": null },
+        { "id": "58", "groupId": "g-1784124692361-51", "cloneSourceId": null },
+        { "id": "94", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "90", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "80", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "93", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "91", "groupId": "g-1784172743016-79", "cloneSourceId": null },
+        { "id": "126", "groupId": null, "cloneSourceId": null }
+      ],
+      "edges": [
+        { "id": "e-1784172643185-78", "source": "72", "target": "77" },
+        { "id": "e-1784172743016-95", "source": "89", "target": "94" },
+        { "id": "e-1785207975090-uxca", "source": "126", "target": "94" }
+      ],
+      "groups": [
+        { "id": "g-1784124692361-51", "parentGroupId": null },
+        { "id": "g-1784172643185-62", "parentGroupId": null },
+        { "id": "g-1784172743016-79", "parentGroupId": null }
+      ],
+      "pins": [],
+      "images": []
+    },
+    {
+      "id": "921068bc-670b-44a0-bbf7-7d540f0cc9b9",
+      "name": "Map Phase 4",
+      "nodes": [
+        { "id": "32", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "34", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "35", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "36", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "37", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "38", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "39", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "40", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "41", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "42", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "43", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "44", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "45", "groupId": null, "cloneSourceId": null },
+        { "id": "46", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "33", "groupId": "g-imported-31", "cloneSourceId": null },
+        { "id": "48", "groupId": null, "cloneSourceId": null }
+      ],
+      "edges": [{ "id": "e-47", "source": "42", "target": "33" }],
+      "groups": [{ "id": "g-imported-31", "parentGroupId": null }],
+      "pins": [
+        { "id": "pin-1784085972622" },
+        { "id": "pin-task-1784086032669-d7l9my" },
+        { "id": "pin-task-1784124503771-kdeg23" }
+      ],
+      "images": []
+    },
+    {
+      "id": "3dfaf7d7-f993-46f0-9afd-c4650c3e8158",
+      "name": "Map Phase 5",
+      "nodes": [
+        { "id": "126", "groupId": null, "cloneSourceId": null },
+        { "id": "127", "groupId": null, "cloneSourceId": null },
+        { "id": "128", "groupId": null, "cloneSourceId": null },
+        { "id": "129", "groupId": null, "cloneSourceId": null },
+        { "id": "130", "groupId": null, "cloneSourceId": null },
+        { "id": "134", "groupId": null, "cloneSourceId": null },
+        { "id": "144", "groupId": null, "cloneSourceId": null },
+        { "id": "145", "groupId": null, "cloneSourceId": null },
+        { "id": "146", "groupId": null, "cloneSourceId": null },
+        { "id": "147", "groupId": null, "cloneSourceId": null },
+        { "id": "148", "groupId": null, "cloneSourceId": null },
+        { "id": "149", "groupId": null, "cloneSourceId": null },
+        { "id": "150", "groupId": null, "cloneSourceId": null },
+        { "id": "151", "groupId": null, "cloneSourceId": null },
+        { "id": "152", "groupId": null, "cloneSourceId": null },
+        { "id": "131", "groupId": null, "cloneSourceId": null },
+        { "id": "132", "groupId": null, "cloneSourceId": null },
+        { "id": "133", "groupId": null, "cloneSourceId": null }
+      ],
+      "edges": [],
+      "groups": [],
+      "pins": [],
+      "images": []
+    },
+    {
+      "id": "857199bd-0a17-45a0-9207-b32b36ba6080",
+      "name": "Map Phase 2",
+      "nodes": [
+        { "id": "15", "groupId": null, "cloneSourceId": null },
+        { "id": "12", "groupId": null, "cloneSourceId": null },
+        { "id": "11", "groupId": null, "cloneSourceId": null },
+        { "id": "49", "groupId": null, "cloneSourceId": null },
+        { "id": "50", "groupId": null, "cloneSourceId": null },
+        { "id": "13", "groupId": "g-1784086910445", "cloneSourceId": null },
+        { "id": "14", "groupId": "g-1784086910445", "cloneSourceId": null }
+      ],
+      "edges": [
+        { "id": "e-1784001873616", "source": "img-1784001868264-3nj3g3", "target": "11" },
+        { "id": "e-1784001879113", "source": "15", "target": "12" },
+        { "id": "e-1784001879599", "target": "12" },
+        { "id": "e-1784001884863", "source": "11", "target": "15" },
+        { "id": "e-1784001897472", "source": "14", "target": "13" }
+      ],
+      "groups": [{ "id": "g-1784086910445", "parentGroupId": null }],
+      "pins": [
+        { "id": "pin-1784001904172" },
+        { "id": "pin-task-1784001948822-1n0k38" },
+        { "id": "pin-task-1784086120340-edm8b1" },
+        { "id": "pin-task-1784086493472-9rbl9c" },
+        { "id": "pin-task-1784124320105-cdedln" }
+      ],
+      "images": [{ "id": "img-1784001868264-3nj3g3", "groupId": null }]
+    },
+    { "id": "4458c2cd-254e-4aa4-83d7-d5b6e5ffe20f", "name": "Map Phase 55", "nodes": [], "edges": [], "groups": [], "pins": [], "images": [] },
+    { "id": "f2635b3f-91ce-4ceb-9235-530ef8f6837d", "name": "aaa", "nodes": [], "edges": [], "groups": [], "pins": [], "images": [] },
+    {
+      "id": "5cd70faa-d289-4222-a865-0689ea30adfd",
+      "name": "Map Phase 7",
+      "nodes": [
+        { "id": "124", "groupId": null, "cloneSourceId": null },
+        { "id": "123", "groupId": null, "cloneSourceId": null },
+        { "id": "125", "groupId": null, "cloneSourceId": null }
+      ],
+      "edges": [
+        { "id": "e-1784572263214", "source": "124", "target": "125" },
+        { "id": "e-1784572266155", "source": "123", "target": "124" },
+        { "id": "e-1784572276029", "target": "125" }
+      ],
+      "groups": [],
+      "pins": [],
+      "images": []
+    },
+    {
+      "id": "0c9cf4ff-4483-40d0-af72-831171fa2a55",
+      "name": "Map Phase 2 (Copy)",
+      "nodes": [
+        { "id": "105", "groupId": null, "cloneSourceId": null },
+        { "id": "106", "groupId": null, "cloneSourceId": null },
+        { "id": "107", "groupId": null, "cloneSourceId": null },
+        { "id": "109", "groupId": null, "cloneSourceId": null },
+        { "id": "110", "groupId": "g-1784566251587-104", "cloneSourceId": null },
+        { "id": "111", "groupId": "g-1784566251587-104", "cloneSourceId": null },
+        { "id": "126", "groupId": null, "cloneSourceId": null },
+        { "id": "108", "groupId": null, "cloneSourceId": null }
+      ],
+      "edges": [
+        { "id": "e-1784566251588-117", "source": "img-1784566251588-122", "target": "107" },
+        { "id": "e-1784566251588-118", "source": "105", "target": "106" },
+        { "id": "e-1784566251588-119", "target": "106" },
+        { "id": "e-1784566251588-120", "source": "107", "target": "105" },
+        { "id": "e-1784566251588-121", "source": "111", "target": "110" }
+      ],
+      "groups": [{ "id": "g-1784566251587-104", "parentGroupId": null }],
+      "pins": [
+        { "id": "pin-1784566251587-112" },
+        { "id": "pin-1784566251587-113" },
+        { "id": "pin-1784566251587-114" },
+        { "id": "pin-1784566251587-115" },
+        { "id": "pin-1784566251587-116" },
+        { "id": "pin-1784832365365" }
+      ],
+      "images": [{ "id": "img-1784566251588-122", "groupId": null }]
+    }
+  ]
+}
