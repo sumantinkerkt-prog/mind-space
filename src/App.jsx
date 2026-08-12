@@ -9,11 +9,13 @@ import {
   MoreVertical, ImageIcon, ChevronUp, Scissors, ClipboardPaste,
   Lock, Shield, Eye, EyeOff, GitBranch, Map, Timer,
   MapPin, Bell, Pencil, MousePointer, ListTodo, Cloud, CloudOff, Loader,
-  AlertTriangle, Settings, Maximize2, Minimize2
+  AlertTriangle, Settings, Maximize2, Minimize2,
+  ShieldCheck, ShieldAlert
 } from 'lucide-react';
 import MiniMap from './MiniMap';
 import PinPanel, { PIN_ICONS } from './PinPanel';
 import ReminderPanel from './ReminderPanel';
+import DataHealthPanel from './DataHealthPanel';
 import FullTaskManager from './FullTaskManager';
 import { GROUP_COLORS } from './taskConstants';
 import { clampPanelPct, DEFAULT_PANEL_PCT } from './PanelResize';
@@ -27,6 +29,7 @@ import { isFirebaseConfigured } from './firebase';
 import { validateWorkspaces } from './workspaceValidator';
 import { applyNodeUpdate, collectCloneInstances } from './nodeUpdate';
 import { DEFAULT_NEXT_ID, deriveNextId } from './cardId';
+import { auditProjectIds, summarizeAudit, SEVERITY } from './idAudit';
 import { uploadImage as uploadImageToStorage, deleteImage as deleteImageFromStorage, deleteWorkspaceImages } from './imageStorageService';
 import {
   saveProjectMeta,
@@ -708,6 +711,8 @@ export default function WorkflowApp() {
   const [reminders, setReminders] = useState([]);
   const [showReminderPanel, setShowReminderPanel] = useState(false);
   const [showCardEditorPanel, setShowCardEditorPanel] = useState(false);
+  // --- Data Health panel (Bug 19): the project-wide id audit, made visible ---
+  const [showDataHealthPanel, setShowDataHealthPanel] = useState(false);
   // `reminderNotificationQueue` is the PENDING buffer: the scheduler pushes due
   // reminders here (unchanged). A separate consumer releases them onto the
   // screen one every few seconds into `visibleReminders` (the on-screen stack).
@@ -2631,20 +2636,52 @@ export default function WorkflowApp() {
   const edges = activeWs?.edges || [];
   const groups = activeWs?.groups || [];
 
-  // --- Duplicate Card ID Detector (debug / visual aid) ---
-  // The architecture assumes every card id is unique; when it isn't, two cards
-  // behave as one object (same position, same group, shared connections, cannot
-  // be dragged or deleted independently). This reads the `nodes` DATA rather
-  // than the DOM, which matters: cards render with `key={node.id}`, so React
-  // warns about the duplicate key and de-duplicates the siblings on re-render.
-  // When that happens only one DOM node exists and no styling trick could ever
-  // reveal the second card - but this set still flags it.
+  // --- Project-wide data health audit (Bugs 19 + 58) ---
+  // All canvases of the open project are resident in memory (they load eagerly
+  // at startup), so a whole-project audit needs no async work and no extra
+  // Firestore reads. It is a pure, read-only pass - see src/idAudit.js.
+  //
+  // The input is debounced rather than audited straight from `workspaces`.
+  // `workspaces` gets a fresh identity on every keystroke, and a full-project
+  // scan in the typing path buys nothing: this is a diagnostic, not a guard
+  // rail, so a report that settles half a second after editing stops is
+  // exactly as useful and costs nothing while you type.
+  const [auditInput, setAuditInput] = useState({ workspaces: [], nextId: DEFAULT_NEXT_ID });
+  const [auditCheckedAt, setAuditCheckedAt] = useState(null);
+  useEffect(() => {
+    if (!initialized) return;
+    const timer = setTimeout(() => {
+      setAuditInput({ workspaces, nextId });
+      setAuditCheckedAt(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [workspaces, nextId, initialized]);
+
+  const projectAudit = useMemo(
+    () => auditProjectIds(auditInput.workspaces, auditInput.nextId),
+    [auditInput],
+  );
+
+  // --- Duplicate Card ID markers for the active canvas ---
+  // This used to compare ids WITHIN the active canvas only, which missed the
+  // case that actually caused harm: an id shared ACROSS two canvases is the
+  // Bug 24 precondition, and it drew no marker at all because each canvas only
+  // ever saw one copy of it. A card is now marked if its id is duplicated
+  // anywhere in the project.
+  //
+  // It reads the `nodes` DATA rather than the DOM, which matters: cards render
+  // with `key={node.id}`, so React de-duplicates same-canvas siblings on
+  // re-render and only one DOM node exists - no styling trick could reveal the
+  // second card, but this set still flags it.
   const duplicateNodeIds = useMemo(() => {
-    const seen = new Set();
     const dupes = new Set();
-    for (const n of nodes) (seen.has(n.id) ? dupes : seen).add(n.id);
+    if (!projectAudit.duplicateIds.size) return dupes;
+    for (const n of nodes) {
+      if (!n || n.id === undefined || n.id === null) continue;
+      if (projectAudit.duplicateIds.has(String(n.id))) dupes.add(n.id);
+    }
     return dupes;
-  }, [nodes]);
+  }, [nodes, projectAudit]);
 
   const cardEditorNode = (selectedNodeIds.length === 1) ? nodes.find(n => n.id === selectedNodeIds[0]) : null;
 
@@ -3904,6 +3941,9 @@ export default function WorkflowApp() {
     enterClass: 'animate-panel-in', exitClass: 'animate-panel-out', exitDuration: 260,
   });
   const cardEditorMount = useAnimatedMount(showCardEditorPanel && viewMode === 'canvas', {
+    enterClass: 'animate-panel-in', exitClass: 'animate-panel-out', exitDuration: 260,
+  });
+  const dataHealthMount = useAnimatedMount(showDataHealthPanel && viewMode === 'canvas', {
     enterClass: 'animate-panel-in', exitClass: 'animate-panel-out', exitDuration: 260,
   });
   const taskPanelMount = useAnimatedMount(taskPanelMode !== 'closed', {
@@ -6082,6 +6122,82 @@ export default function WorkflowApp() {
     setFocusedPinId(pinId);
     setTimeout(() => setFocusedPinId(null), 2000);
   };
+
+  // A cross-canvas reveal that is waiting for the canvas switch to land.
+  const pendingRevealRef = useRef(null);
+  const focusFlashTimerRef = useRef(null);
+
+  /**
+   * Centre the viewport on one card and flash it.
+   *
+   * Reads workspaces through `stateRef` rather than the render closure so it can
+   * be called from an effect immediately after a canvas switch, when the closure
+   * would still be describing the previous canvas.
+   */
+  const centreOnCard = useCallback((workspaceId, cardId) => {
+    if (cardId === undefined || cardId === null) return;
+    const currentWorkspaces = (stateRef.current && stateRef.current.workspaces) || [];
+    const targetWs = currentWorkspaces.find(w => w && w.id === workspaceId);
+    if (!targetWs || !workspaceRef.current) return;
+
+    // Compared as strings: the audit normalises ids, but live data can still
+    // hold a number where the app allocates a string.
+    const cardList = Array.isArray(targetWs.nodes) ? targetWs.nodes : [];
+    const card = cardList.find(n => n && String(n.id) === String(cardId));
+    if (!card) return;
+
+    const rect = workspaceRef.current.getBoundingClientRect();
+    setTransform(prev => ({
+      x: rect.width / 2 - (Number(card.x) || 0) * prev.scale,
+      y: rect.height / 2 - (Number(card.y) || 0) * prev.scale,
+      scale: prev.scale,
+    }));
+    setFocusedNodeId(card.id);
+    if (focusFlashTimerRef.current) clearTimeout(focusFlashTimerRef.current);
+    focusFlashTimerRef.current = setTimeout(() => setFocusedNodeId(null), 2500);
+  }, []);
+
+  /**
+   * Data Health panel -> canvas (Bug 19).
+   *
+   * A finding you cannot locate is only half a report, so every row in the
+   * panel can bring you to the thing it is talking about. This switches canvas,
+   * centres the view and flashes the card.
+   *
+   * Read-only by construction: it moves the viewport and the highlight, and
+   * touches no card, edge or workspace data. That is what makes it safe to use
+   * from a read-only Reference tab. `cardId` is optional - findings that only
+   * concern a canvas (a broken connection, unreadable data) jump to the canvas
+   * and stop there.
+   */
+  const revealAuditTarget = useCallback(({ workspaceId, cardId }) => {
+    if (!workspaceId) return;
+
+    if (workspaceId === activeTab) {
+      centreOnCard(workspaceId, cardId);
+      return;
+    }
+
+    // Landing on another canvas cannot be done in one step. Switching canvas
+    // clears `focusedNodeId` (see the effect on [activeTab] above) and the new
+    // canvas has not rendered yet, so centring and highlighting here would both
+    // be thrown away. Park the request and finish it once the switch lands.
+    pendingRevealRef.current = (cardId === undefined || cardId === null)
+      ? null
+      : { workspaceId, cardId };
+    setActiveTab(workspaceId);
+  }, [activeTab, centreOnCard]);
+
+  // Finishes a cross-canvas reveal once the switch has landed. Deliberately
+  // declared after the effect that clears `focusedNodeId` on [activeTab]:
+  // effects run in declaration order within a commit, so the flash set here
+  // survives instead of being cleared immediately after being set.
+  useEffect(() => {
+    const pending = pendingRevealRef.current;
+    if (!pending || pending.workspaceId !== activeTab) return;
+    pendingRevealRef.current = null;
+    centreOnCard(pending.workspaceId, pending.cardId);
+  }, [activeTab, workspaces, centreOnCard]);
 
   // --- Task System Functions ---
   const normalizeTasks = (taskList) => {
@@ -8662,13 +8778,35 @@ export default function WorkflowApp() {
                     : xrayCards ? 'bg-indigo-50 text-indigo-600' : 'text-slate-600 hover:bg-slate-100'
                 }`}
                 title={duplicateNodeIds.size > 0
-                  ? `Warning: ${duplicateNodeIds.size} duplicate card ID${duplicateNodeIds.size > 1 ? 's' : ''} in this workspace (outlined in red dashes). Click to fade all cards to 50% and reveal stacked ones.`
+                  ? `Warning: ${duplicateNodeIds.size} card${duplicateNodeIds.size > 1 ? 's' : ''} on this canvas share an ID with another card in this project (outlined in red dashes). Click to fade all cards to 50% and reveal stacked ones.`
                   : xrayCards
                     ? 'X-Ray Cards: on - click to restore full opacity'
                     : 'X-Ray Cards - fade all cards to 50% to reveal overlapping/stacked cards'}
                 aria-pressed={xrayCards}
               >
                 <Layers className="w-4 h-4 sm:w-5 sm:h-5"/>
+              </button>
+              <div className="h-px w-5 bg-slate-200 my-0.5" />
+              {/* Data Health (project-wide id audit, Bug 19). Colours itself from
+                  the findings, so a duplicate id on ANY canvas announces itself
+                  without the panel being open and without anyone remembering to
+                  look. Available in read-only Reference tabs too: the audit and
+                  the panel only ever read data. */}
+              <button
+                onClick={() => setShowDataHealthPanel(prev => !prev)}
+                className={`p-1.5 sm:p-2 rounded-md transition-colors ${
+                  projectAudit.severity === SEVERITY.CRITICAL
+                    ? 'bg-red-50 text-red-600 hover:bg-red-100'
+                    : projectAudit.severity === SEVERITY.WARNING
+                      ? 'bg-amber-50 text-amber-600 hover:bg-amber-100'
+                      : showDataHealthPanel ? 'bg-indigo-50 text-indigo-600' : 'text-slate-600 hover:bg-slate-100'
+                }`}
+                title={`Data Health: ${summarizeAudit(projectAudit)} Click for the full report.`}
+                aria-pressed={showDataHealthPanel}
+              >
+                {projectAudit.severity === SEVERITY.OK
+                  ? <ShieldCheck className="w-4 h-4 sm:w-5 sm:h-5"/>
+                  : <ShieldAlert className="w-4 h-4 sm:w-5 sm:h-5"/>}
               </button>
             </div>
           </div>
@@ -9072,6 +9210,20 @@ export default function WorkflowApp() {
             </>
           );
         })()}
+
+        {/* --- Data Health Panel (project-wide id audit, Bug 19) --- */}
+        {dataHealthMount.shouldRender && !isFocusMode && (
+          <DataHealthPanel
+            className={dataHealthMount.animationClass}
+            report={projectAudit}
+            projectName={projects.find(p => p.id === activeProjectId)?.name || 'This project'}
+            lastCheckedAt={auditCheckedAt}
+            onClose={() => setShowDataHealthPanel(false)}
+            onReveal={revealAuditTarget}
+            panelWidthPct={panelWidthPct}
+            onSetPanelWidth={setPanelWidthPct}
+          />
+        )}
 
         {/* --- Pin Panel --- */}
         {pinPanelMount.shouldRender && !isFocusMode && (

@@ -67,6 +67,18 @@ describe('highestNumericCardId', () => {
     expect(highestNumericCardId([null, { id: 'ws', nodes: [null, { id: '7' }] }])).toBe(7);
   });
 
+  it('survives nodes being a truthy non-iterable value (Bug 58)', () => {
+    // `for (const n of {})` throws "object is not iterable". This function runs
+    // on the live allocation path, so a half-written import that left `nodes`
+    // as an object used to break card creation outright instead of degrading.
+    expect(highestNumericCardId([{ id: 'ws', nodes: { '0': { id: '9' } } }])).toBe(0);
+    expect(highestNumericCardId([{ id: 'ws', nodes: 'nonsense' }])).toBe(0);
+    expect(highestNumericCardId([{ id: 'ws', nodes: 42 }])).toBe(0);
+    // A healthy canvas alongside a broken one still contributes its ids.
+    expect(highestNumericCardId([{ id: 'a', nodes: {} }, { id: 'b', nodes: [{ id: '15' }] }])).toBe(15);
+    expect(deriveNextId([{ id: 'ws', nodes: {} }], 1)).toBe(DEFAULT_NEXT_ID);
+  });
+
   it('ignores non-numeric ids instead of choking on them', () => {
     // Forward compatibility with the eventual UUID migration.
     const workspaces = [{
