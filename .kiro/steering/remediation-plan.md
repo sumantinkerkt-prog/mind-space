@@ -26,7 +26,7 @@ Only these six are in scope. Everything else is explicitly deferred.
 | 1 | 24 | Scope card edits to the active workspace; clone sync via explicit `cloneSourceId` only | **Done** — PR #2, merged (`56c3aef`) |
 | 2 | 16 (counter subset only) | Unify the `nextId` default, derive the counter from the highest live card id before every allocation, fix `addNode`'s same-batch closure read | **Done** — PR #2, merged (`56c3aef`) |
 | 3 | 19 (+ shape guard from 58) | Project-wide duplicate-id and dangling-clone check, non-throwing, **visible in production** (not DEV-gated) | **Done** — PR #3, branch `fix/bug-19-58-project-wide-id-detector` |
-| 4 | 42 | Distinguish "no data" from "couldn't read"; never write or upload defaults after an indeterminate read | Not started |
+| 4 | 42 | Distinguish "no data" from "couldn't read"; never write or upload defaults after an indeterminate read | **Done** — PR #6, branch `fix/bug-42-indeterminate-read` |
 | 5 | 30 + minimal 43 | `guardedFirestoreSave` must return a real promise; route queued failures to `enqueueFailedWrite`; `confirmSynced` clears dirty only if the confirmed content hash still matches current local content | Not started |
 | 6 | 47 (four leaks only) | Block writes in reference sessions: reminder scheduler metadata, retry-queue execution, canvas-switch local save/flush, `PinPanel` raw setters | Not started |
 
@@ -166,6 +166,105 @@ ReferenceError during render. It logs `[History] Discarded ...` instead.
 
 Verified: 71 unit tests pass, and in a real browser add-card → undo → redo still
 works (4 → 5 → 4 → 5 cards) with the guard staying silent.
+
+## FIXED (PR #6): a failed read was indistinguishable from "no data" (Bug 42)
+
+Every storage reader collapsed two different situations into `null`: "there is
+genuinely nothing stored" and "I could not look". `init()` treated `null` as the
+first, built the default demo project (`defaultWorkspaces`, App.jsx:252 — note
+this is demo *content*, not an empty canvas), wrote it to localStorage, and armed
+autosave on it. One transient network error was enough to overwrite everything.
+
+**Three things made it worse than it sounds.**
+
+1. `loadUserMeta()` returning null skipped the *entire* Firestore phase, because
+   the phase is gated on `if (userMeta && userMeta.activeProjectId)` — and
+   `setSyncStatus('synced')` still ran afterwards.
+2. `init()`'s catch-all rebuilt the default project on *any* throw, including a
+   localStorage quota error from `saveProjectMeta`/`saveWorkspaceToLocal`, which
+   are not try-wrapped.
+3. The "Sync now" button in the trust popover set
+   `firestoreLoadSucceededRef.current = true` unconditionally, deliberately
+   defeating the failed-load guard. One click after a bad boot uploaded whatever
+   was in localStorage.
+
+**The shape of the fix.** A new pure module, `src/loadOutcome.js`, classifies
+each load as one of FOUR states where the old code understood two:
+
+| Outcome | Meaning | Default project? | Writes? |
+|---|---|---|---|
+| `LOADED_COMPLETE` | data, no failed reads | no | **yes** |
+| `LOADED_PARTIAL` | data, but a read failed | no | **no** |
+| `EMPTY_CONFIRMED` | no data, no failed reads | **yes** | **yes** |
+| `INDETERMINATE` | no data because a read failed | **no** | **no** |
+
+`LOADED_PARTIAL` matters as much as `INDETERMINATE`: if one workspace of five
+fails to read, the project is displayed with four, and saving it would delete the
+fifth on the server.
+
+Collection side: `persistenceService.js` gained a read-failure registry. Each of
+the ~17 swallowing `catch` blocks now calls `recordReadFailure(source, error)`
+while still returning `null`, so **no reader signature changed** — a deliberately
+small diff through a load path with no test coverage. Severity is per-source and
+**fails closed**: an unrecognised source counts as critical, so a future reader
+added without updating the table makes the app read-only and loud, rather than
+silently able to overwrite again.
+
+`localStorage:syncState` is classified critical even though it holds no content:
+a corrupt map reads back as "every document clean", which is exactly the state in
+which `transactionalWrite` skips its revision check and overwrites the server.
+
+**The registry is append-only, read via an offset token** (`beginReadSession()`).
+A clearing API would have been unsafe: StrictMode double-invokes the mount effect
+in dev, so two `init()` runs overlap, and the second run's reset could wipe the
+first run's recorded failure while it was still awaiting Firestore — that run
+would then classify an empty result as `EMPTY_CONFIRMED` and create the default
+project. The fix, reintroducing the bug. Verified in the browser: both StrictMode
+runs independently reach INDETERMINATE.
+
+**Write paths gated** on `writesAllowed()` (= `mayPersist(loadOutcomeRef.current)`):
+all four autosave effects (including their *immediate* localStorage writes, which
+were previously unguarded), the activeTab effect, the password effect (the one
+autosave that never checked `firestoreLoadSucceededRef` at all), the
+beforeunload/visibilitychange flush, `handleCanvasSwitch`, `handleManualServerSync`,
+`pushDirtyNow`, the retry-queue drain, the dirty-flag recovery sync, and the
+"Sync now" override. `applyLoadOutcome` also force-clears
+`firestoreLoadSucceededRef` as an independent second layer.
+
+**The dirty flag is no longer cleared after a bad load.** It is the only record
+that a previous session had unsynced edits; clearing it destroys recovery
+information, so it is now left set for a later healthy session.
+
+**UI.** `INDETERMINATE` renders a blocking screen ("Could not read your data",
+"Your data has not been changed", + Reload). This had to be placed **before**
+`if (!initialized || !activeWs) return null;` (App.jsx) — with no project there is
+no active workspace, so that bail-out otherwise rendered a blank white page,
+which is the worst possible thing to show someone whose data you just failed to
+read. Found in browser testing, not by reading the code. `LOADED_PARTIAL` renders
+a red top banner and stays read-only but readable, so the owner can still copy
+things out.
+
+**Verified in a real browser** (Firebase credentials neutered first), 7 scenarios:
+genuine first run still gets the starter project; corrupt `cm-meta` with real data
+present → blocking screen, `cm-meta` NOT overwritten, no `cm-proj-proj-default`
+created, real keys untouched; corrupt single workspace → red banner, other canvas
+visible, `workspaceIds` NOT truncated; healthy load unaffected. The decisive
+differential: after a partial load, `cm-sync-state` and `cm-tasks-*` are never
+created, while a healthy load creates both — proving autosave genuinely did not
+run rather than the test being blind. 113 unit tests pass (71 existing + 42 new).
+
+**Deliberately left undone** (recorded in MANUAL-TEST-PR6.md §7):
+
+- Two writes still precede the verdict: the per-workspace adoption cache write and
+  the project-metadata hydration loop, both inside the Firestore success path.
+  Both only write data that was read successfully, and both write per-document
+  rather than a shortened list, so neither can destroy a canvas. Moving the
+  verdict earlier means restructuring the whole load sequence.
+- `fetchServerFreshness` still returns all-null revisions on failure, so the
+  caller concludes "nothing newer". Recorded but benign for the load verdict;
+  belongs to Fix 5.
+- No React error boundary: a render-time throw still blanks the page. The
+  blocking screen only covers load failures the load code detects.
 
 ## Usage rules given to the owner
 

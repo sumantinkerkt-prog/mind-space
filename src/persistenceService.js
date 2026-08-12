@@ -9,6 +9,99 @@
 
 import { collection, doc, setDoc, getDoc, getDocs, deleteDoc, updateDoc, increment, serverTimestamp, arrayUnion, arrayRemove, runTransaction } from 'firebase/firestore';
 import { db, isFirebaseConfigured } from './firebase';
+import { severityForSource, READ_SEVERITY } from './loadOutcome';
+
+// =============================================================================
+// READ-FAILURE REGISTRY (Bug 42)
+// =============================================================================
+//
+// Every reader below has a catch block that returns null / {} / [] on failure.
+// That value is indistinguishable from "there is nothing stored", which is how
+// a transient network error used to make App.jsx build a default demo project
+// and upload it over the user's real data.
+//
+// Rather than change ~17 return types (a large, risky diff through the whole
+// load path), each catch now ALSO records the failure here. Callers that care -
+// currently just init() in App.jsx - ask this registry whether the null they
+// received meant "empty" or "broken". Callers that do not care are unaffected,
+// so the readers keep their existing signatures.
+//
+// Severity classification lives in loadOutcome.js so it stays pure and testable.
+// =============================================================================
+
+/**
+ * Append-only log of read failures. Append-only, and read via a start offset,
+ * because a shared "clear then collect" registry is not safe here: React
+ * StrictMode double-invokes the mount effect in development, so two init() runs
+ * overlap. With a clearing API, the second run's reset could wipe the first
+ * run's recorded failure while the first run was still awaiting Firestore - and
+ * that run would then classify an empty result as EMPTY_CONFIRMED and create a
+ * default project. Exactly the bug we are fixing, reintroduced by the fix.
+ *
+ * With an offset token each concurrent load sees only its OWN failures, and
+ * neither can hide anything from the other.
+ */
+let _readFailures = [];
+
+/** Hard cap so a pathological retry loop cannot grow this without bound. */
+const MAX_RECORDED_READ_FAILURES = 500;
+
+/**
+ * Begin a read session. Returns an opaque token to pass to getReadFailures().
+ * Cheap enough to call on every load.
+ */
+export function beginReadSession() {
+  return _readFailures.length;
+}
+
+/**
+ * Reset the log entirely. For tests; production code uses beginReadSession().
+ */
+export function resetReadFailures() {
+  _readFailures = [];
+}
+
+/**
+ * Record that a read could not be completed.
+ *
+ * Deliberately never throws: it is called from inside catch blocks, and a
+ * failure to record a failure must not escalate into an unhandled exception on
+ * the load path.
+ *
+ * @param {string} source - a key from READ_SOURCE_SEVERITY in loadOutcome.js
+ * @param {unknown} error - the caught value (may be anything)
+ * @param {object} [context] - optional identifying detail (projectId, workspaceId)
+ */
+export function recordReadFailure(source, error, context) {
+  try {
+    const severity = severityForSource(source);
+    // Stop appending rather than dropping the oldest entries: shifting would
+    // invalidate every outstanding session token.
+    if (_readFailures.length >= MAX_RECORDED_READ_FAILURES) return;
+    _readFailures.push({
+      source,
+      severity,
+      message: (error && error.message) || String(error || 'unknown error'),
+      context: context || null,
+      at: Date.now(),
+    });
+    // Critical read failures are the ones that switch the app to read-only, so
+    // they are worth a real console entry rather than the reader's quiet warn.
+    if (severity === READ_SEVERITY.CRITICAL) {
+      console.error('[Read] CRITICAL read failure (%s):', source, (error && error.message) || error, context || '');
+    }
+  } catch {
+    /* never let diagnostics break the load */
+  }
+}
+
+/**
+ * Failures recorded since a session token was taken.
+ * @param {number} [since] token from beginReadSession(); omit for all failures.
+ */
+export function getReadFailures(since = 0) {
+  return _readFailures.slice(typeof since === 'number' && since >= 0 ? since : 0);
+}
 
 // =============================================================================
 // CONSTANTS - localStorage key patterns
@@ -77,7 +170,10 @@ export function getDeviceIdentity() {
       const parsed = JSON.parse(raw);
       if (parsed && parsed.id) return { id: parsed.id, name: parsed.name || null };
     }
-  } catch { /* fall through to regenerate */ }
+  } catch (e) {
+    // Benign: a regenerated device id only mislabels "last edited by".
+    recordReadFailure('localStorage:device', e);
+  }
   const identity = { id: generateId(), name: null };
   try { localStorage.setItem(KEY_DEVICE, JSON.stringify(identity)); } catch { /* ignore */ }
   return identity;
@@ -158,7 +254,13 @@ function loadSyncStateMap() {
   try {
     const raw = localStorage.getItem(KEY_SYNC_STATE);
     return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
+  } catch (e) {
+    // Critical despite holding no content: an empty map reads back as "every
+    // document is clean and non-dirty", which is precisely the state in which
+    // transactionalWrite skips its revision check and overwrites the server.
+    recordReadFailure('localStorage:syncState', e);
+    return {};
+  }
 }
 
 function saveSyncStateMap(map) {
@@ -253,7 +355,11 @@ function loadTombstones() {
   try {
     const raw = localStorage.getItem(KEY_TOMBSTONES);
     return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
+  } catch (e) {
+    // Benign: losing tombstones can only resurrect a deleted workspace.
+    recordReadFailure('localStorage:tombstones', e);
+    return {};
+  }
 }
 
 function saveTombstones(map) {
@@ -327,7 +433,9 @@ export function loadMeta() {
   try {
     const raw = localStorage.getItem(KEY_META);
     return raw ? JSON.parse(raw) : null;
-  } catch {
+  } catch (e) {
+    // Bug 42: a corrupt or unreadable cm-meta is NOT "no projects yet".
+    recordReadFailure('localStorage:meta', e);
     return null;
   }
 }
@@ -349,7 +457,8 @@ export function loadProjectMeta(projectId) {
   try {
     const raw = localStorage.getItem(KEY_PROJECT_PREFIX + projectId);
     return raw ? JSON.parse(raw) : null;
-  } catch {
+  } catch (e) {
+    recordReadFailure('localStorage:projectMeta', e, { projectId });
     return null;
   }
 }
@@ -373,7 +482,10 @@ export function loadWorkspace(projectId, workspaceId) {
   try {
     const raw = localStorage.getItem(KEY_WORKSPACE_PREFIX + projectId + '-' + workspaceId);
     return raw ? JSON.parse(raw) : null;
-  } catch {
+  } catch (e) {
+    // Critical: callers push only truthy results into the workspace list, so a
+    // swallowed failure here silently drops a whole canvas from the project.
+    recordReadFailure('localStorage:workspace', e, { projectId, workspaceId });
     return null;
   }
 }
@@ -406,7 +518,10 @@ export function loadTasks(projectId) {
   try {
     const raw = localStorage.getItem(KEY_TASKS_PREFIX + projectId);
     return raw ? JSON.parse(raw) : null;
-  } catch {
+  } catch (e) {
+    // Callers turn null into `tasks: []`, which autosave would then write back
+    // over a real task list.
+    recordReadFailure('localStorage:tasks', e, { projectId });
     return null;
   }
 }
@@ -631,7 +746,10 @@ function loadRetryQueue() {
   try {
     const raw = localStorage.getItem(RETRY_QUEUE_KEY);
     return raw ? JSON.parse(raw) : [];
-  } catch {
+  } catch (e) {
+    // Benign: the data itself is still on disk and still marked dirty, so the
+    // next edit re-queues it. Only the pending retry attempts are lost.
+    recordReadFailure('localStorage:retryQueue', e);
     return [];
   }
 }
@@ -917,6 +1035,7 @@ export async function loadProjectFromFirestore(projectId) {
     return docSnap.exists() ? docSnap.data() : null;
   } catch (error) {
     console.warn('[PersistenceService] Error loading project from Firestore:', error.message);
+    recordReadFailure('firestore:project', error, { projectId });
     return null;
   }
 }
@@ -1053,6 +1172,10 @@ export async function loadWorkspaceFromFirestore(projectId, workspaceId) {
     return docSnap.exists() ? docSnap.data() : null;
   } catch (error) {
     console.warn('[PersistenceService] Error loading workspace from Firestore:', error.message);
+    // The init loop does `if (wsData) loadedWorkspaces.push(wsData)`, so without
+    // this record a failed read silently shortens the project by one canvas and
+    // autosave then deletes it on the server.
+    recordReadFailure('firestore:workspace', error, { projectId, workspaceId });
     return null;
   }
 }
@@ -1074,6 +1197,7 @@ export async function loadAllProjectsFromFirestore() {
     return projects;
   } catch (error) {
     console.warn('[PersistenceService] Error loading all projects from Firestore:', error.message);
+    recordReadFailure('firestore:allProjects', error);
     return null;
   }
 }
@@ -1095,6 +1219,7 @@ export async function loadAllWorkspacesFromFirestore(projectId) {
     return workspaces;
   } catch (error) {
     console.warn('[PersistenceService] Error loading all workspaces from Firestore:', error.message);
+    recordReadFailure('firestore:allWorkspaces', error, { projectId });
     return null;
   }
 }
@@ -1140,6 +1265,9 @@ export async function reconcileWorkspaceIds(projectId) {
     return orphanedIds;
   } catch (error) {
     console.warn('[PersistenceService] Error reconciling workspace IDs:', error.message);
+    // Benign: reconcile is itself an orphan-recovery mechanism. Failing it means
+    // orphans stay hidden, which is the pre-existing state, not new damage.
+    recordReadFailure('firestore:reconcile', error, { projectId });
     return [];
   }
 }
@@ -1187,6 +1315,7 @@ export async function loadTasksFromFirestore(projectId) {
     return docSnap.exists() ? docSnap.data() : null;
   } catch (error) {
     console.warn('[PersistenceService] Error loading tasks from Firestore:', error.message);
+    recordReadFailure('firestore:tasks', error, { projectId });
     return null;
   }
 }
@@ -1224,6 +1353,10 @@ export async function loadUserMeta() {
     return docSnap.exists() ? docSnap.data() : null;
   } catch (error) {
     console.warn('[PersistenceService] Error loading userMeta from Firestore:', error.message);
+    // Worst offender before this fix: init() gates the ENTIRE Firestore phase on
+    // `if (userMeta && userMeta.activeProjectId)`. A failure here skipped the
+    // cloud silently, fell through to localStorage, and still reported 'synced'.
+    recordReadFailure('firestore:userMeta', error);
     return null;
   }
 }
@@ -1664,6 +1797,10 @@ export async function fetchServerFreshness(projectId, workspaceId) {
     }
   } catch (error) {
     console.warn('[PersistenceService] fetchServerFreshness failed:', error.message);
+    // Benign for the load verdict, but note the consequence: `out` still has
+    // all-null revisions, so the caller concludes "the server has nothing
+    // newer". That belongs to the Fix 5 honest-sync work, not here.
+    recordReadFailure('firestore:freshness', error, { projectId, workspaceId });
   }
   return out;
 }
@@ -1798,6 +1935,7 @@ export async function loadSnapshot(projectId, stampId) {
     return d.exists() ? d.data() : null;
   } catch (error) {
     console.warn('[PersistenceService] loadSnapshot failed:', error.message);
+    recordReadFailure('firestore:snapshot', error, { projectId, stampId });
     return null;
   }
 }
