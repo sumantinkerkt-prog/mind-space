@@ -3,3 +3,8 @@ dist/
 *.local
 .DS_Store
 vite.config.js.timestamp-*.mjs
+
+# Cloud data exports produced by audit/verifyCloudAccess.mjs.
+# These contain the full contents of every workspace (all node text). This
+# repository is PUBLIC, so committing them would publish your notes verbatim.
+audit/cloud-backup-*.json
