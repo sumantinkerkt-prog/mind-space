@@ -30,6 +30,7 @@ import { validateWorkspaces } from './workspaceValidator';
 import { applyNodeUpdate, collectCloneInstances } from './nodeUpdate';
 import { DEFAULT_NEXT_ID, deriveNextId } from './cardId';
 import { auditProjectIds, summarizeAudit, SEVERITY } from './idAudit';
+import { snapshotBelongsToProject } from './history';
 import { uploadImage as uploadImageToStorage, deleteImage as deleteImageFromStorage, deleteWorkspaceImages } from './imageStorageService';
 import {
   saveProjectMeta,
@@ -611,7 +612,7 @@ export default function WorkflowApp() {
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   
-  const stateRef = useRef({ workspaces: defaultWorkspaces, activeTab: 'ws-1', nextId: 10 });
+  const stateRef = useRef({ workspaces: defaultWorkspaces, activeTab: 'ws-1', nextId: 10, projectId: '' });
   const dragSnapshot = useRef(null);
   const draggingNodeRef = useRef(null);
 
@@ -1511,9 +1512,13 @@ export default function WorkflowApp() {
     init();
   }, []);
 
+  // `projectId` is carried here so that every undo snapshot records which project
+  // it came from. Every snapshot in the app -- takeSnapshot, the counter-snapshots
+  // undo and redo push, and all four drag snapshots -- is a deep clone of this
+  // one object, so stamping it here stamps all of them. See src/history.js.
   useEffect(() => {
-    stateRef.current = { workspaces, activeTab, nextId };
-  }, [workspaces, activeTab, nextId]);
+    stateRef.current = { workspaces, activeTab, nextId, projectId: activeProjectId };
+  }, [workspaces, activeTab, nextId, activeProjectId]);
 
   // --- Card id allocation (Bug 16, counter containment) ---------------------
   // Ids come from a cursor that only ever moves FORWARD and is continually
@@ -2606,7 +2611,18 @@ export default function WorkflowApp() {
     if (pastRef.current.length === 0) return;
     const newPast = [...pastRef.current];
     const prev = newPast.pop();
-    
+
+    // A snapshot is a whole-project state, so it must never be restored into a
+    // different project than the one it was taken from. Every path that swaps
+    // the open project clears the history, but this refuses to act on a stale
+    // snapshot even if some future path forgets to. Restoring one merges two
+    // projects' canvases together and autosave then uploads the result.
+    if (!snapshotBelongsToProject(prev, activeProjectId)) {
+      console.warn('[History] Discarded undo history belonging to another project.');
+      updateHistory([], []);
+      return;
+    }
+
     const newFuture = [JSON.parse(JSON.stringify(stateRef.current)), ...futureRef.current];
     
     updateHistory(newPast, newFuture);
@@ -2614,14 +2630,21 @@ export default function WorkflowApp() {
     setWorkspaces(prev.workspaces);
     setActiveTab(prev.activeTab);
     setNextId(prev.nextId);
-  }, [updateHistory, isPreviewMode]);
+  }, [updateHistory, isPreviewMode, activeProjectId]);
 
   const performRedo = useCallback(() => {
     if (isPreviewMode) return;
     if (futureRef.current.length === 0) return;
     const newFuture = [...futureRef.current];
     const next = newFuture.shift();
-    
+
+    // Same ownership rule as undo, for the same reason.
+    if (!snapshotBelongsToProject(next, activeProjectId)) {
+      console.warn('[History] Discarded redo history belonging to another project.');
+      updateHistory([], []);
+      return;
+    }
+
     const newPast = [...pastRef.current, JSON.parse(JSON.stringify(stateRef.current))];
     
     updateHistory(newPast, newFuture);
@@ -2629,7 +2652,7 @@ export default function WorkflowApp() {
     setWorkspaces(next.workspaces);
     setActiveTab(next.activeTab);
     setNextId(next.nextId);
-  }, [updateHistory, isPreviewMode]);
+  }, [updateHistory, isPreviewMode, activeProjectId]);
 
   const activeWs = workspaces.find(w => w.id === activeTab) || workspaces[0];
   const nodes = activeWs?.nodes || [];
@@ -4886,6 +4909,18 @@ export default function WorkflowApp() {
       setStoredPassword(next.password || '');
       setPasswordEnabled(!!next.password);
       setIsAuthenticated(false);
+      // Reset history. The snapshots in it describe the project that was just
+      // deleted, so leaving them would let the next Ctrl+Z restore a dead
+      // project's canvases into this one -- autosave would then upload the
+      // merged result. `switchProject` and `cycleToProject` already do this;
+      // omitting it here was the bug. `dragSnapshot` is cleared for the same
+      // reason: it is pushed onto the history when a drag ends.
+      pastRef.current = [];
+      futureRef.current = [];
+      dragSnapshot.current = null;
+      setCanUndo(false);
+      setCanRedo(false);
+      setTransform({ x: 0, y: 0, scale: 1 });
       const meta = loadMeta() || { schemaVersion: 2 };
       saveMeta({ ...meta, activeProjectId: next.id });
       if (isFirebaseConfigured()) saveUserMeta({ activeProjectId: next.id, defaultProjectId }).catch(() => {});

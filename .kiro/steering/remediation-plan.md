@@ -67,6 +67,17 @@ Then stop and let the owner use the app for 2-3 weeks before anything else.
 - Each sandbox bash call gets a **fresh namespace**: `/tmp` is empty again and
   background processes do not survive between calls. A dev server plus browser
   automation must run inside a single shell script in one call.
+- The Projects panel has **no visible button** — it opens on **Alt+Shift+X**
+  (`App.jsx`, "Secret Keyboard Shortcuts"). Ctrl+Shift+/ is a "boss key" that
+  jumps to the default project. Worth knowing before hunting for a control that
+  does not exist.
+- Fragility found while building a test harness, **not fixed**: the Projects
+  panel does `p.id.split('')` (App.jsx:7137) to pick a placeholder colour, so a
+  project whose stored metadata lacks an `id` **white-screens the whole app** the
+  moment the panel is opened, with no error boundary to contain it. A synthetic
+  seed triggered it, but a partial cloud write could too. The app also then wrote
+  a `cm-proj-undefined` key. Cheap hardening: default the colour index and stop
+  trusting `p.id`.
 
 ## Delivery conventions
 
@@ -102,7 +113,7 @@ same-canvas duplicate ids, same canvas. Not proof, but the number matches
 exactly, and duplicate `key` props are known to make React drop and re-parent
 siblings. Re-test on the fresh project before spending time on any other theory.
 
-## Open bug: undo after deleting a project merges two projects together
+## FIXED (PR #5): undo after deleting a project merged two projects together
 
 Found by the owner during PR #3 sign-off (test G1). Not caused by PR #3.
 
@@ -132,14 +143,29 @@ the project that was just deleted. `undo()` restores it into the open project.
 The Data Health panel from Fix 3 will go red afterwards, which is how this would
 now be noticed.
 
-**Fix (not yet applied):** clear `pastRef`/`futureRef` and reset `canUndo`/
-`canRedo` in `deleteProject`, exactly as `switchProject` already does. Deliberately
-not slipped into PR #3 — the owner had already signed that build off, and adding
-code would have invalidated the sign-off. Do it as its own change.
+**Fixed in two layers**, because fixing only the one call site would leave the
+next author free to reintroduce it:
 
-Scope of exposure is narrow: project **switch** already clears history, and
-deleting a *canvas* stays within one project where undo is legitimate. Project
-deletion is the only route. The owner has said they do not delete projects.
+1. `deleteProject` now clears `pastRef`/`futureRef`/`dragSnapshot` and resets
+   `canUndo`/`canRedo`, as `switchProject` and `cycleToProject` already did.
+   `dragSnapshot` matters too — it is pushed onto the history when a drag ends.
+2. Every snapshot is stamped with its project id and `performUndo`/`performRedo`
+   refuse a snapshot belonging to a different project, discarding the stale
+   history instead. Cheap to do, because every snapshot in the app is a deep
+   clone of `stateRef.current`, so stamping that one object covers all of them
+   (takeSnapshot, the undo/redo counter-snapshots, and the four drag snapshots).
+   The rule is a pure function in `src/history.js` with tests.
+
+Unstamped snapshots are deliberately allowed: that can only happen before the
+app knows which project is open, when there is no other project to contaminate,
+and refusing them would silently disable undo.
+
+Note the guard could not raise a toast: `showToast` is declared after
+`performUndo`, so naming it in the dependency array would throw a TDZ
+ReferenceError during render. It logs `[History] Discarded ...` instead.
+
+Verified: 71 unit tests pass, and in a real browser add-card → undo → redo still
+works (4 → 5 → 4 → 5 cards) with the guard staying silent.
 
 ## Usage rules given to the owner
 
