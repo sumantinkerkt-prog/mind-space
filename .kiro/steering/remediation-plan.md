@@ -102,6 +102,45 @@ same-canvas duplicate ids, same canvas. Not proof, but the number matches
 exactly, and duplicate `key` props are known to make React drop and re-parent
 siblings. Re-test on the fresh project before spending time on any other theory.
 
+## Open bug: undo after deleting a project merges two projects together
+
+Found by the owner during PR #3 sign-off (test G1). Not caused by PR #3.
+
+Delete a project, then press Ctrl+Z: every canvas of the **deleted** project
+appears inside the project that is now open. Confirmed by the owner with two
+`Bravo (Copy)` canvases and `Product Launch Roadmap` all listed under `Test 2`.
+
+**Cause, confirmed in code.** `switchProject` (App.jsx:4478-4481) resets the undo
+history with `pastRef.current = []` / `futureRef.current = []`. `deleteProject`
+(App.jsx:4808) does not. It swaps `activeProjectId`, calls `setWorkspaces` with
+the next project's data, and leaves the history untouched — so the top of the
+undo stack is still a `{ workspaces, activeTab, nextId }` snapshot belonging to
+the project that was just deleted. `undo()` restores it into the open project.
+
+**Why this is worse than it looks.** The restored state is not a display glitch:
+
+1. It arrives through the normal `setWorkspaces` path, so autosave treats it as
+   an edit and **uploads the merged project to the cloud**.
+2. It restores the deleted project's `nextId`, rewinding the stored counter.
+   Contained by the Fix 2 live-data floor, so no id is reissued, but the stored
+   value is left wrong.
+3. Canvases from two projects had ids allocated from two independent counters,
+   so merging them can produce **cross-canvas duplicate ids** — the Bug 24
+   precondition. Inert since Fix 1, but it is the exact condition this whole
+   remediation exists to remove.
+
+The Data Health panel from Fix 3 will go red afterwards, which is how this would
+now be noticed.
+
+**Fix (not yet applied):** clear `pastRef`/`futureRef` and reset `canUndo`/
+`canRedo` in `deleteProject`, exactly as `switchProject` already does. Deliberately
+not slipped into PR #3 — the owner had already signed that build off, and adding
+code would have invalidated the sign-off. Do it as its own change.
+
+Scope of exposure is narrow: project **switch** already clears history, and
+deleting a *canvas* stays within one project where undo is legitimate. Project
+deletion is the only route. The owner has said they do not delete projects.
+
 ## Usage rules given to the owner
 
 Until the fixes land: one editing tab, one device, never delete a canvas, never

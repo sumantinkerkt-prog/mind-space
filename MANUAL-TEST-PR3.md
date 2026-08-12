@@ -483,12 +483,20 @@ clone links.
 **Preconditions:** Panel open.
 
 1. Expand **Connections with a missing end**.
-2. Record the badge number: ______  *(reference value: 4)*
+2. Record the badge number: ______  *(reference value: 4 or 5 — see note below)*
 
 **Expect:** rows naming a canvas and saying either that a connection has **no
 starting point / no end point**, or that it **points at something that no longer
 exists**. Canvases named should include `hetercdtea`, `Map Phase 2`,
 `Map Phase 7` and `Map Phase 2 (Copy)`.
+
+> **Note on 4 vs 5.** The reference figure of 4 comes from the hand-transcribed
+> copy of the export, which omitted image records. The live project reports **5**,
+> the extra one being a connection on `Map Phase 2 (Copy)` whose start is an
+> **image** id (`img-...`) that is not on that canvas. That is a correct finding,
+> not a false alarm: connections may legitimately attach to cards, groups **or**
+> images, and this one points at an image that is not there. Either 4 or 5 is a
+> PASS.
 
 3. Check the badge colour.
 
