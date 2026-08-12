@@ -1,0 +1,42 @@
+rules_version = '2';
+
+// =============================================================================
+// Cloud Storage Security Rules - ThoughtFlow / mind-space
+// =============================================================================
+// NOTE: These rules cannot be deployed until the default Storage bucket has
+// actually been provisioned. As of this writing the bucket returns HTTP 404,
+// meaning Storage has never been enabled for this project. Provisioning it
+// requires the Blaze (pay-as-you-go) plan, which became mandatory for Cloud
+// Storage for Firebase - including default buckets - in October 2024.
+//
+// Until then, `firebase deploy --only storage` will fail. Deploy Firestore
+// rules on their own:  firebase deploy --only firestore:rules
+// =============================================================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // -------------------------------------------------------------------------
+    // images/{projectId}/{workspaceId}/{imageId}
+    // Path built in imageStorageService.js (uploadImage / deleteImage /
+    // deleteWorkspaceImages).
+    // -------------------------------------------------------------------------
+    match /images/{projectId}/{workspaceId}/{imageId} {
+
+      // Downloads: getDownloadURL() + <img src> need public read.
+      allow read: if true;
+
+      // Uploads: cap size and require an image MIME type so the bucket cannot
+      // be used to host arbitrary files. `request.resource` is only populated
+      // on create/update, which is why delete is handled separately below -
+      // applying these conditions to a blanket `write` would break deletes.
+      allow create, update: if request.resource.size < 10 * 1024 * 1024
+                            && request.resource.contentType.matches('image/.*');
+
+      // Deletes carry no payload, so no resource conditions apply.
+      allow delete: if true;
+    }
+
+    // All other bucket paths denied by default.
+  }
+}
