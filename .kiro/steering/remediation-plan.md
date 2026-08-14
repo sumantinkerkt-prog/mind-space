@@ -26,11 +26,45 @@ Only these six are in scope. Everything else is explicitly deferred.
 | 1 | 24 | Scope card edits to the active workspace; clone sync via explicit `cloneSourceId` only | **Done** — PR #2, merged (`56c3aef`) |
 | 2 | 16 (counter subset only) | Unify the `nextId` default, derive the counter from the highest live card id before every allocation, fix `addNode`'s same-batch closure read | **Done** — PR #2, merged (`56c3aef`) |
 | 3 | 19 (+ shape guard from 58) | Project-wide duplicate-id and dangling-clone check, non-throwing, **visible in production** (not DEV-gated) | **Done** — PR #3, branch `fix/bug-19-58-project-wide-id-detector` |
-| 4 | 42 | Distinguish "no data" from "couldn't read"; never write or upload defaults after an indeterminate read | **Done** — PR #6, branch `fix/bug-42-indeterminate-read` |
+| 4 | 42 | Distinguish "no data" from "couldn't read"; never write or upload defaults after an indeterminate read | **Done** — PR #6, merged. Owner-verified over 3 rounds |
 | 5 | 30 + minimal 43 | `guardedFirestoreSave` must return a real promise; route queued failures to `enqueueFailedWrite`; `confirmSynced` clears dirty only if the confirmed content hash still matches current local content | Not started |
 | 6 | 47 (four leaks only) | Block writes in reference sessions: reminder scheduler metadata, retry-queue execution, canvas-switch local save/flush, `PinPanel` raw setters | Not started |
 
 Then stop and let the owner use the app for 2-3 weeks before anything else.
+
+## Carried forward after Fix 4 (do not lose these)
+
+1. **`cm-debug-simulate-cloud-failure` must be removed after Fix 6.** It is the
+   fault-injection switch that made Bug 42 testable at all. Owner agreed to keep it
+   through the remediation work. Reuse it for Fix 5 (failed saves), then delete it
+   and the manual-test references to it.
+2. **The 20-30s blank page on a slow/unreachable cloud is still there.** Cloud
+   reads have no time limit and the app renders nothing until they resolve, so a
+   flaky connection is indistinguishable from a broken app. Pre-existing, not
+   caused by Fix 4, but Fix 4's messages cannot appear until the read resolves.
+   Offered to the owner as a follow-up (an ~8s cap plus a "Loading…" state); not
+   yet accepted or scheduled.
+3. **A missing (as opposed to corrupt) local workspace key is still silent.**
+   `loadWorkspace` returning null because the key is ABSENT records no failure, so
+   the canvas is dropped from the project with no read-only banner. Deliberately
+   not treated as a failure: `workspaceIds` legitimately drifts from the actual
+   documents (see the `updateDoc` / failed-precondition issue below), so treating
+   every mismatch as damage risked putting the app permanently in read-only. The
+   Fix 3 Data Health panel surfaces the consequence.
+4. **Owner-testability constraints discovered the hard way** — apply these to every
+   future manual test document:
+   - The app is served over the internet, so **"turn off Wi-Fi" tests nothing**;
+     the browser cannot fetch the app and shows Chrome's offline page.
+   - An incognito window has empty local storage but a **full cloud**, so it does
+     not produce a first-run state.
+   - With a reachable cloud, localStorage is **not** the load source, so corrupting
+     local keys exercises nothing on the cloud path (except the per-workspace
+     adoption read, which is why the Group D tests did work).
+   - Cloud reads take **20-30s** to fail. Any measurement needs a 40s wait, or the
+     switch.
+   - **No Console line goes into a manual test document until it has been run
+     against a real browser.** Two rounds of the owner's time were lost to lines
+     that could not have worked.
 
 ## Do NOT do
 

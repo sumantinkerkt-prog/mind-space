@@ -771,6 +771,40 @@ are not forgotten.
 | E — offline | 2 | 1 (E1) | | | *E2 re-run requested* |
 | **Total** | **14** | | | | |
 
+### FINAL RESULT: accepted (round 3)
+
+| Test | Round 1 | Round 2 | Round 3 (final) |
+|---|---|---|---|
+| A1 — new browser gets starter project | PASS (invalid) | **N/A** — untestable on a cloud-connected app; verified by Kiro in sandbox | — |
+| B1 — real project opens normally | **PASS** | | |
+| B2 — editing and saving work | **PASS** | | |
+| B3 — switching canvases works | **PASS** | | |
+| C1 — blocking screen appears | BLOCKED | BLOCKED (Wi-Fi method impossible) | **PASS** |
+| C2 — nothing is written | BLOCKED | FAIL (my filter bug) | **PASS** — `NOTHING WAS WRITTEN`, added/removed/changed all empty |
+| C3 — upload cannot be forced | BLOCKED | | **PASS** |
+| C4 — repair restores everything | BLOCKED | | **PASS** |
+| D1 — broken canvas → read-only banner | **PASS** | | |
+| D2 — edits not saved in read-only | **PASS** | | |
+| D3 — Sync now cannot upload | **PASS** | | |
+| D4 — repair restores the canvas | **PASS** | | |
+| E1 — going offline mid-session | **PASS** | | |
+| E2 — reload while offline | PASS | ☑ SKIP — not testable on a web-hosted app | — |
+| E2b — offline editing allowed (Option A) | | | **PASS** |
+| E2c — damaged data still read-only | | | **PASS** |
+
+**Every runnable test passes.** Two are permanently untestable by the owner on a
+cloud-connected, web-hosted app (A1 and the original E2); both were replaced or
+verified another way, and both are explained above rather than quietly dropped.
+
+**Signed off by the owner. Merged to main.**
+
+Three rounds were needed because the first two test documents were wrong, not
+because the code was. Root cause in both cases: they were written against a
+sandbox with Firebase disabled and the app served locally, which is a different
+code path and a different failure mode from the owner's real setup. The lasting
+fixes for that were (a) the fault-injection switch, and (b) a rule that no Console
+line goes into this document until it has been run against a real browser.
+
 ### Round 1 results (recorded)
 
 | Test | Result | Note |
