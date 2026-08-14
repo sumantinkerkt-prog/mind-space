@@ -34,6 +34,27 @@ nothing at all. Nothing here requires a terminal.
 | Data | Any real project of yours, plus the ability to open the browser's developer Console (see §3) |
 | Risk | **Low.** No test edits, deletes or repairs a card. Two tests corrupt one stored key inside your browser and then restore it. Nothing is uploaded during those tests — proving that is the point. |
 
+## 1a. THE PANIC LINE — if you get lost, confused, or stuck
+
+At any point in any test, paste this into the Console and press Enter, then
+reload. It turns the testing switch off and puts back anything these tests broke:
+
+```
+(()=>{localStorage.removeItem('cm-debug-simulate-cloud-failure');const b=sessionStorage.getItem('fix4-backup');if(b)localStorage.setItem('cm-meta',b);const k=sessionStorage.getItem('fix4-ws-key'),v=sessionStorage.getItem('fix4-ws-val');if(k&&v!==null)localStorage.setItem(k,v);return 'everything restored - now reload the page'})()
+```
+
+**Expected:** `everything restored - now reload the page`.
+
+Two caveats, so it is not trusted blindly:
+
+- It restores from backups held in `sessionStorage`, which is **cleared when you
+  close the tab.** If you close the tab mid-test, this line cannot help — tell me
+  instead, and do not reload. Your cloud copy is untouched either way.
+- If it prints anything else, stop and send me what it printed.
+
+Verified working: after running it and reloading, the project came back complete
+with the pointer intact.
+
 ## 2. How to record results
 
 Each test ends with a result line. Tick one box.
@@ -201,14 +222,20 @@ Saving is working normally.
 2. Paste this line and press Enter. It saves a copy of the pointer, then breaks it:
 
    ```
-   sessionStorage.setItem('fix4-backup', localStorage.getItem('cm-meta')); localStorage.setItem('cm-meta', 'BROKEN{{{'); 'pointer broken'
+   (()=>{sessionStorage.setItem('fix4-backup',localStorage.getItem('cm-meta'));localStorage.setItem('cm-meta','BROKEN{{{');return 'pointer broken (backed up)'})()
    ```
 
-   **Expected:** the Console prints `'pointer broken'`.
+   **Expected:** the Console prints `'pointer broken (backed up)'`.
 
-3. Paste this line and press Enter, to record what your data looks like *before*
-   the reload. (It ignores `cm-device`, which the app rewrites on every load by
-   design.)
+3. ### ⚠️ ORDER MATTERS — this step must come AFTER step 2
+   Take the snapshot **after** breaking the pointer, never before. The snapshot is
+   the "before the app loads" reference, and step 2 is a change *you* made, not the
+   app. Snapshot first and `cm-meta` shows up as changed by your own hand, which
+   reads as a failure when nothing is wrong. (I made exactly this mistake writing
+   these instructions.)
+
+   Paste this to record the full contents of every stored record. (It ignores
+   `cm-device`, which the app rewrites on every load by design.)
 
    ```
    (()=>{const snap={};Object.keys(localStorage).filter(k=>k.startsWith('cm-')&&k!=='cm-device'&&!k.startsWith('cm-debug')).sort().forEach(k=>{snap[k]=localStorage.getItem(k)});sessionStorage.setItem('fix4-snap',JSON.stringify(snap));return 'snapshot taken: '+Object.keys(snap).length+' records'})()
@@ -568,14 +595,36 @@ now syncs to the cloud. (Delete it afterwards if you don't want it.)
 
 Proves Option A did not weaken the real protection.
 
-1. `localStorage.setItem('cm-debug-simulate-cloud-failure','1')`
-2. Break one canvas, exactly as in D1 step 3 (the line that backs it up first).
+1. Break one canvas. This line picks a canvas that is **not** the one on screen
+   (breaking the displayed one would leave a blank page), backs it up, then breaks
+   it — so there is no id for you to look up or type:
+
+   ```
+   (()=>{const m=JSON.parse(localStorage.getItem('cm-meta'));const pid=m.activeProjectId;const p=JSON.parse(localStorage.getItem('cm-proj-'+pid));const ids=p.workspaceIds||[];const urlWs=((location.hash||'').match(/\/(?:editor|view)\/[^/]+\/([^/?#]+)/)||[])[1];const target=ids.find(id=>id!==p.activeTab&&id!==urlWs);if(!target)return 'ERROR: this project needs at least 2 canvases - tell Kiro';const k='cm-ws-'+pid+'-'+target;const v=localStorage.getItem(k);if(v===null)return 'ERROR: no stored record for '+target+' - tell Kiro';sessionStorage.setItem('fix4-ws-key',k);sessionStorage.setItem('fix4-ws-val',v);localStorage.setItem(k,'}}BROKEN');return 'broke canvas: '+target})()
+   ```
+
+   **Expected:** `broke canvas: <some id>`. If it starts with `ERROR:`, stop and
+   tell me — nothing has been changed.
+
+2. Turn the switch on:
+
+   ```
+   localStorage.setItem('cm-debug-simulate-cloud-failure','1'); 'switch ON'
+   ```
+
 3. **Reload.**
 
-**Expected:** the **red** read-only banner, **not** the amber offline one. A piece
-of data really is missing here, so saving stays off.
+**Expected:** the **red** read-only banner ("Saving is OFF…"), **not** the amber
+offline one, and **not** a blank page. A piece of data really is missing here, so
+saving stays off. This is the line between the two modes.
 
-4. Restore the canvas (D4's line) and turn the switch off, then reload.
+4. Restore and switch off:
+
+   ```
+   (()=>{localStorage.removeItem('cm-debug-simulate-cloud-failure');const k=sessionStorage.getItem('fix4-ws-key'),v=sessionStorage.getItem('fix4-ws-val');if(!k||v===null)return 'ERROR: backup missing - tell Kiro, do not reload';localStorage.setItem(k,v);return 'canvas restored, switch OFF'})()
+   ```
+
+5. **Reload.** Everything back, no banners.
 
 **Result:** ☐ PASS ☐ FAIL ☐ BLOCKED
 **Notes:**
