@@ -95,6 +95,59 @@ export function recordReadFailure(source, error, context) {
   }
 }
 
+// =============================================================================
+// FAULT INJECTION - make a cloud READ fail on purpose, for testing
+// =============================================================================
+//
+// Why this exists in shipped code. The data-safety behaviour of this app is
+// almost entirely about what happens when a read FAILS, and there is no way to
+// exercise that from the outside:
+//
+//   * Turning off the network is useless - the app is served over the internet,
+//     so the browser cannot fetch the app itself and you never reach the code.
+//   * DevTools request blocking works but is eight fiddly steps, and the owner
+//     is not a developer.
+//   * The "no data at all" verdict is structurally UNREACHABLE while the cloud
+//     is healthy, because a healthy cloud always returns the real projects.
+//
+// So the only practical way for the owner to verify the protection is a switch.
+//
+// SAFETY PROPERTIES, deliberately chosen:
+//   1. OFF unless explicitly set. Absent key = normal behaviour.
+//   2. It only makes READS fail. It never writes, deletes or corrupts anything.
+//   3. It fails in the SAFE direction. A simulated read failure puts the app in
+//      read-only mode, so a switch accidentally left on makes the app refuse to
+//      save - annoying, visible, and harmless. It cannot cause data loss.
+//   4. Verbosely named, and announced in the console on every read it blocks, so
+//      it can never be mistaken for a real fault.
+//
+// Turn on:  localStorage.setItem('cm-debug-simulate-cloud-failure', '1')
+// Turn off: localStorage.removeItem('cm-debug-simulate-cloud-failure')
+// =============================================================================
+
+/** localStorage key that, when set to '1', makes every cloud read fail. */
+export const DEBUG_SIMULATE_CLOUD_FAILURE_KEY = 'cm-debug-simulate-cloud-failure';
+
+/**
+ * If the debug switch is on, return an Error to throw; otherwise null.
+ * Each cloud reader throws it inside its own try block, so the failure travels
+ * the REAL error path (same catch, same recordReadFailure, same verdict) rather
+ * than a special case that might behave differently from a genuine fault.
+ */
+function simulatedCloudReadFailure(what) {
+  try {
+    if (localStorage.getItem(DEBUG_SIMULATE_CLOUD_FAILURE_KEY) === '1') {
+      console.warn(
+        '[Debug] Simulating a FAILED cloud read of "%s" because %s is set. ' +
+        'This is a deliberate test switch, not a real fault. Remove the key to restore normal behaviour.',
+        what, DEBUG_SIMULATE_CLOUD_FAILURE_KEY
+      );
+      return new Error(`Simulated cloud read failure (${what}) - ${DEBUG_SIMULATE_CLOUD_FAILURE_KEY} is set`);
+    }
+  } catch { /* localStorage unavailable: behave normally */ }
+  return null;
+}
+
 /**
  * Failures recorded since a session token was taken.
  * @param {number} [since] token from beginReadSession(); omit for all failures.
@@ -1030,6 +1083,7 @@ export async function removeWorkspaceIdFromFirestore(projectId, workspaceId) {
 export async function loadProjectFromFirestore(projectId) {
   if (!isFirebaseConfigured() || !db) return null;
   try {
+    const sim = simulatedCloudReadFailure('project ' + projectId); if (sim) throw sim;
     const docRef = doc(db, 'projects', projectId);
     const docSnap = await getDoc(docRef);
     return docSnap.exists() ? docSnap.data() : null;
@@ -1167,6 +1221,7 @@ export async function deleteProjectFromFirestore(projectId, workspaceIds = []) {
 export async function loadWorkspaceFromFirestore(projectId, workspaceId) {
   if (!isFirebaseConfigured() || !db) return null;
   try {
+    const sim = simulatedCloudReadFailure('workspace ' + workspaceId); if (sim) throw sim;
     const docRef = doc(db, 'projects', projectId, 'workspaces', workspaceId);
     const docSnap = await getDoc(docRef);
     return docSnap.exists() ? docSnap.data() : null;
@@ -1188,6 +1243,7 @@ export async function loadWorkspaceFromFirestore(projectId, workspaceId) {
 export async function loadAllProjectsFromFirestore() {
   if (!isFirebaseConfigured() || !db) return null;
   try {
+    const sim = simulatedCloudReadFailure('all projects'); if (sim) throw sim;
     const collRef = collection(db, 'projects');
     const snapshot = await getDocs(collRef);
     const projects = new Map();
@@ -1310,6 +1366,7 @@ export async function saveTasksToFirestore(projectId, data) {
 export async function loadTasksFromFirestore(projectId) {
   if (!isFirebaseConfigured() || !db) return null;
   try {
+    const sim = simulatedCloudReadFailure('tasks'); if (sim) throw sim;
     const docRef = doc(db, 'projects', projectId, 'tasks', 'taskData');
     const docSnap = await getDoc(docRef);
     return docSnap.exists() ? docSnap.data() : null;
@@ -1348,6 +1405,7 @@ export async function saveUserMeta(meta) {
 export async function loadUserMeta() {
   if (!isFirebaseConfigured() || !db) return null;
   try {
+    const sim = simulatedCloudReadFailure('userMeta'); if (sim) throw sim;
     const docRef = doc(db, 'userMeta', 'main');
     const docSnap = await getDoc(docRef);
     return docSnap.exists() ? docSnap.data() : null;

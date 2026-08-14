@@ -70,6 +70,7 @@ BLOCKED and tell me — I will run them and give you the evidence.
 | **Sync chip** | The little cloud status button in the top toolbar |
 | **Sync now** | The button inside the panel that opens when you click the sync chip |
 | **Console** | See §3 |
+| **Cloud-failure switch** | A testing switch I added so you can make the app's cloud reads fail on purpose. Turn on with `localStorage.setItem('cm-debug-simulate-cloud-failure','1')`, off with `localStorage.removeItem('cm-debug-simulate-cloud-failure')`. Off unless you set it; only affects reading; if left on the app just refuses to save. See §7 item 7. |
 
 ## 5. Requirement coverage
 
@@ -164,36 +165,35 @@ Saving is working normally.
 
 # GROUP C — a completely failed read (the heart of Bug 42)
 
-> ## ⚠️ CORRECTED — the original Group C could not work. Please use these steps.
+> ## ⚠️ CORRECTED TWICE — please use the steps below. No network fiddling.
 >
-> **My error, found by you.** The original steps broke the small local pointer
-> record (`cm-meta`) and expected the blocking screen. But **when your cloud is
-> reachable, the app never reads that record** — it loads everything from the
-> cloud instead, and the local pointer is ignored (and then simply repaired).
-> Breaking it changed nothing, which is exactly what you saw. The app was right;
-> my test was testing nothing.
+> **Attempt 1 was wrong** (breaking `cm-meta` alone): while your cloud is
+> reachable the app never reads that record — it loads from the cloud and ignores
+> the local pointer. Breaking it changed nothing, exactly as you saw. Confirmed in
+> code: that read is at `App.jsx:1293`, inside the `else` at line 1291, which only
+> runs **after a cloud read has already failed**.
 >
-> I confirmed this in the code: the local pointer is read at `App.jsx:1293`,
-> which sits inside the `else` branch at line 1291 — the branch that only runs
-> **when the cloud read has already failed.**
+> **Attempt 2 was also wrong** (turn off Wi-Fi): **your app is served over the
+> internet**, so with no connection the browser cannot fetch the app at all and
+> you get Chrome's dinosaur page. You never reach the code. My sandbox served the
+> app from the local machine, which is why I did not hit this.
 >
-> **The correction: you must disconnect the internet as well.** That makes the
-> cloud read fail, which is what sends the app down the local path, where the
-> broken pointer then matters. One added step, and the group works.
+> There is a structural problem underneath both mistakes: **the blocking screen
+> can only appear when a cloud read fails, and you cannot fail the cloud read
+> without also failing the page load.**
 >
-> **This is also the more realistic test** — a cloud read failure is your actual
-> Bug 42 exposure, far more likely than corrupt local data.
+> **So I have added a switch for it.** One Console line makes the app's cloud
+> reads fail on purpose, with the app itself loading normally. It is off unless
+> you set it, it only affects *reading*, and it fails in the safe direction — if
+> you ever forget to turn it off, the app simply refuses to save and tells you so.
+> It cannot lose data. Details in §7 item 7, including how to have me remove it.
 
-> ### ⏱ Two things to expect before you start
->
-> 1. **The page stays blank for about 20–30 seconds after the reload.** This is
->    normal here: the cloud connection has to time out before the app gives up.
->    **Do not reload again during this time.** Wait a full 40 seconds.
-> 2. This blank wait is a **separate pre-existing problem** I found while
->    re-checking your results (see §7, item 5). It is not caused by this fix, and
->    it is not what you are testing here.
+> ### ⏱ Expect this to be quick
+> With the switch, the failure is immediate — no 20–30 second blank wait. If you
+> ever *do* see a long blank page in normal use, that is the separate pre-existing
+> problem in §7 item 5.
 
-## C1 — Cloud unreachable + broken pointer shows the blocking screen
+## C1 — A failed cloud read + broken pointer shows the blocking screen
 
 **Preconditions:** the app open and loaded normally (B1 passed).
 
@@ -211,16 +211,19 @@ Saving is working normally.
    design.)
 
    ```
-   sessionStorage.setItem('fix4-keys', Object.keys(localStorage).filter(k=>k.startsWith('cm-')&&k!=='cm-device').sort().join(',')); sessionStorage.getItem('fix4-keys')
+   sessionStorage.setItem('fix4-keys', Object.keys(localStorage).filter(k=>k.startsWith('cm-')&&k!=='cm-device'&&!k.startsWith('cm-debug')).sort().join(',')); sessionStorage.getItem('fix4-keys')
    ```
 
    **Expected:** a list of names starting with `cm-`. Leave it on screen.
 
-4. **⚠️ NEW STEP — turn off your Wi-Fi / disconnect the network now.** Without
-   this the test cannot work.
+4. **⚠️ CORRECTED STEP — turn the cloud-failure switch ON** (do **not** touch your
+   Wi-Fi):
 
-5. **Reload the page, then wait a full 40 seconds.** The page will be blank for
-   most of that. Do not reload again.
+   ```
+   localStorage.setItem('cm-debug-simulate-cloud-failure', '1'); 'cloud reads will now fail on purpose'
+   ```
+
+5. **Reload the page.** It should settle within a few seconds.
 
 **Expected result:** you see the **blocking screen** — a card headed **"Could not
 read your data"**, with the smaller line *"Your data has not been changed."*, a
@@ -301,7 +304,13 @@ and no canvas — so there is no control that could upload anything.
    lost, e.g. because the tab was closed in between. Your data is still fine; I
    will give you a different recovery line.)
 
-2. **⚠️ Turn your Wi-Fi / network back on.**
+2. **⚠️ Turn the cloud-failure switch OFF** — important, do not skip:
+
+   ```
+   localStorage.removeItem('cm-debug-simulate-cloud-failure'); 'switch off: ' + (localStorage.getItem('cm-debug-simulate-cloud-failure') === null)
+   ```
+
+   **Expected:** it prints `switch off: true`.
 
 3. **Reload the page.**
 
@@ -446,31 +455,56 @@ error state. **No** blocking screen. Your cards stay on screen.
 1. Turn off your Wi-Fi.
 2. **Reload the page.**
 
-> ## ⚠️ CORRECTED expected result — please re-run this one
+> ## ⚠️ REPLACED — reloading with no Wi-Fi cannot be tested this way
 >
-> The original wording here was vague, and I have since measured what actually
-> happens. **Please re-run E2 and tell me which of these you see**, because it
-> decides an open design question (see §7, item 6).
+> Same problem as Group C: with no connection the browser cannot fetch the app,
+> so you get Chrome's dinosaur page and never reach the code. **Skip the Wi-Fi
+> version.** Use E2b below instead — it tests the same thing (the cloud is
+> unreachable, your local copy is fine) using the switch.
 
-**Expected result:** the page is **blank for about 20–30 seconds** (the cloud
-connection timing out — do not reload during this), and then:
+**E2 (Wi-Fi version):** ☑ SKIP — not testable on a web-hosted app
 
-- your project **does** open from the local copy, **but with the red read-only
-  banner across the top**, and saving switched off.
+## E2b — Cloud unreachable, local copy complete (replaces E2)
 
-**Please record which you actually got:**
+**This test decides an open design question.** Please read the result carefully
+and tell me whether you are happy with the behaviour — see §7 item 6.
 
-- ☐ Red banner + my project visible, read-only (what I now expect)
-- ☐ Blocking screen ("Could not read your data")
-- ☐ Project opened normally, fully editable, no banner
-- ☐ Blank page even after 60+ seconds
-- ☐ Something else — describe it
+**Preconditions:** app loaded normally, your real project open. **Do not** break
+`cm-meta` for this test — your local data must be healthy.
 
-**Unacceptable in any case:** the starter demo project appearing, or an empty
-editable canvas.
+1. Open the Console and turn the switch on:
 
-3. Reconnect and reload. Your project must open normally and completely, with no
-   banner.
+   ```
+   localStorage.setItem('cm-debug-simulate-cloud-failure', '1'); 'armed'
+   ```
+
+2. **Reload the page.** Wait a few seconds.
+
+**Expected result (this is what I measured):** your project **does** open, your
+canvases and cards are all visible and correct — **but there is a red read-only
+banner across the top and saving is switched off.**
+
+3. Confirm the read-only part: add a card called `E2B CHECK`, wait 15 seconds,
+   then reload.
+
+**Expected:** `E2B CHECK` is gone. Nothing you typed was saved.
+
+4. Turn the switch off and reload:
+
+   ```
+   localStorage.removeItem('cm-debug-simulate-cloud-failure'); 'switch off'
+   ```
+
+**Expected:** normal operation returns, no banner, saving works again.
+
+**Now the question for you.** Before this fix, this situation let you keep working
+offline and saving locally, syncing when the connection came back. Now it is
+read-only. Which do you want?
+
+- ☐ **Option A (I recommend this):** let me keep working offline — saving locally,
+  uploads still blocked, with a gentler "working offline, not synced" notice
+- ☐ **Option B:** leave it as it is — read-only whenever the cloud cannot be read
+- ☐ Not sure, talk me through it again
 
 **Result:** ☐ PASS ☐ FAIL ☐ BLOCKED
 **Notes:**
@@ -554,6 +588,29 @@ are not forgotten.
    situation from "part of my project failed to load", and only the second one
    carries the risk of erasing something. See my message for the full reasoning
    and the two options. **This needs your decision, not mine.**
+
+7. **I added a testing switch to the shipped app, and you can veto it.**
+   `cm-debug-simulate-cloud-failure` makes the app's cloud reads fail on purpose.
+   I added it because there was otherwise **no way for you to test the main thing
+   this fix does** — see the corrected Group C header for why turning off Wi-Fi
+   and breaking local data both fail to reach the code.
+
+   Why I judged it safe to ship:
+
+   - **Off unless explicitly set.** No key, no effect.
+   - **Reads only.** It never writes, deletes or alters anything.
+   - **Fails safe.** A simulated read failure puts the app in read-only mode. If
+     you left it on by accident, the app refuses to save and says so on screen —
+     visible and harmless. It cannot cause data loss.
+   - **Impossible to mistake for a real fault.** It announces itself in the
+     Console every time it blocks a read.
+   - **Useful again for Fix 5**, which is all about failed saves.
+
+   If you would rather not have test code in the app, say so and I will remove it
+   before merge — but then Group C and E2b become untestable by you, and you would
+   be trusting my sandbox results for the central claim of this fix. **My
+   recommendation: keep it while the remediation work is ongoing, and I will
+   remove it when we finish Fix 6.**
 
 ---
 
