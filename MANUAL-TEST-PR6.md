@@ -94,24 +94,29 @@ If every test below passes, this milestone is complete.
 
 ## A1 — A genuine new browser still gets a starter project
 
-**Why this test exists:** the fix makes the app refuse to create a starter
-project after a failed read. It must still create one for a real new user.
-
-**Preconditions:** none. Use a **private/incognito window** so your real data is
-untouched.
-
-1. Open a **new private/incognito window**.
-2. Go to your app's address.
-3. Wait for it to finish loading.
-
-**Expected result:** the **demo project** appears — a canvas called *Product
-Launch Roadmap* with the four cards listed in §4. There is **no** blocking
-screen and **no** red banner.
-
-4. Close the private window.
-
-**Result:** ☐ PASS ☐ FAIL ☐ BLOCKED
-**Notes:**
+> ## ⚠️ CORRECTED — this test is NOT valid on your machine. Mark it **N/A**.
+>
+> **My error, found by you.** This test was written for an app with no cloud
+> connection. Yours has one, and that changes everything:
+>
+> A private/incognito window gives you empty **browser** storage — but your
+> **cloud** is still full. So the app does not experience a first run at all; it
+> downloads your real projects from the cloud. One of them is `proj-default`,
+> whose first canvas still holds the original starter content. **That is why you
+> saw exactly the expected cards** — you were looking at your own cloud data, not
+> at a freshly created starter project. Completely different code path.
+>
+> Your instinct was right: marking this PASS would have proved nothing.
+>
+> **A genuine first run needs empty browser storage AND an empty cloud**, which
+> is not something you can arrange without deleting your cloud data. So this one
+> is not yours to test.
+>
+> **I verified it instead**, in a sandbox with the cloud connection disabled:
+> empty storage → the starter project *is* created, saved, and shown; no blocking
+> screen, no banner. Re-verified after every later change.
+>
+> **Mark:** ☑ N/A (verified by Kiro — sandbox, cloud disabled)
 
 ---
 
@@ -159,11 +164,36 @@ Saving is working normally.
 
 # GROUP C — a completely failed read (the heart of Bug 42)
 
-> This group breaks the small pointer record the app uses to find your projects,
-> which makes the app unable to read anything. **Before the fix, this exact
-> situation produced the demo project and then uploaded it over your real work.**
+> ## ⚠️ CORRECTED — the original Group C could not work. Please use these steps.
+>
+> **My error, found by you.** The original steps broke the small local pointer
+> record (`cm-meta`) and expected the blocking screen. But **when your cloud is
+> reachable, the app never reads that record** — it loads everything from the
+> cloud instead, and the local pointer is ignored (and then simply repaired).
+> Breaking it changed nothing, which is exactly what you saw. The app was right;
+> my test was testing nothing.
+>
+> I confirmed this in the code: the local pointer is read at `App.jsx:1293`,
+> which sits inside the `else` branch at line 1291 — the branch that only runs
+> **when the cloud read has already failed.**
+>
+> **The correction: you must disconnect the internet as well.** That makes the
+> cloud read fail, which is what sends the app down the local path, where the
+> broken pointer then matters. One added step, and the group works.
+>
+> **This is also the more realistic test** — a cloud read failure is your actual
+> Bug 42 exposure, far more likely than corrupt local data.
 
-## C1 — A broken pointer shows the blocking screen, not the demo project
+> ### ⏱ Two things to expect before you start
+>
+> 1. **The page stays blank for about 20–30 seconds after the reload.** This is
+>    normal here: the cloud connection has to time out before the app gives up.
+>    **Do not reload again during this time.** Wait a full 40 seconds.
+> 2. This blank wait is a **separate pre-existing problem** I found while
+>    re-checking your results (see §7, item 5). It is not caused by this fix, and
+>    it is not what you are testing here.
+
+## C1 — Cloud unreachable + broken pointer shows the blocking screen
 
 **Preconditions:** the app open and loaded normally (B1 passed).
 
@@ -177,15 +207,20 @@ Saving is working normally.
    **Expected:** the Console prints `'pointer broken'`.
 
 3. Paste this line and press Enter, to record what your data looks like *before*
-   the reload:
+   the reload. (It ignores `cm-device`, which the app rewrites on every load by
+   design.)
 
    ```
-   sessionStorage.setItem('fix4-keys', Object.keys(localStorage).filter(k=>k.startsWith('cm-')).sort().join(',')); sessionStorage.getItem('fix4-keys')
+   sessionStorage.setItem('fix4-keys', Object.keys(localStorage).filter(k=>k.startsWith('cm-')&&k!=='cm-device').sort().join(',')); sessionStorage.getItem('fix4-keys')
    ```
 
    **Expected:** a list of names starting with `cm-`. Leave it on screen.
 
-4. **Reload the page.**
+4. **⚠️ NEW STEP — turn off your Wi-Fi / disconnect the network now.** Without
+   this the test cannot work.
+
+5. **Reload the page, then wait a full 40 seconds.** The page will be blank for
+   most of that. Do not reload again.
 
 **Expected result:** you see the **blocking screen** — a card headed **"Could not
 read your data"**, with the smaller line *"Your data has not been changed."*, a
@@ -195,10 +230,14 @@ and try again** button.
 
 **You must NOT see:** the demo project, any canvas, or an empty editable canvas.
 
-5. Click **Technical details** on that screen.
+6. Click **Technical details** on that screen.
 
-**Expected:** it lists `localStorage:meta ×1 (critical)` — naming the read that
-failed.
+**Expected:** it lists **two** failed reads, naming both things that went wrong:
+
+```
+firestore:userMeta ×1 (critical)
+localStorage:meta ×1 (critical)
+```
 
 **Result:** ☐ PASS ☐ FAIL ☐ BLOCKED
 **Notes:**
@@ -211,19 +250,25 @@ reload yet.**
 1. Open the Console and paste this line:
 
    ```
-   JSON.stringify({pointerStillBroken: localStorage.getItem('cm-meta')==='BROKEN{{{', demoProjectInvented: localStorage.getItem('cm-proj-proj-default')!==null, keysNow: Object.keys(localStorage).filter(k=>k.startsWith('cm-')).sort().join(','), keysBefore: sessionStorage.getItem('fix4-keys')})
+   JSON.stringify({pointerStillBroken: localStorage.getItem('cm-meta')==='BROKEN{{{', keyListIdentical: sessionStorage.getItem('fix4-keys')===Object.keys(localStorage).filter(k=>k.startsWith('cm-')&&k!=='cm-device').sort().join(','), keysNow: Object.keys(localStorage).filter(k=>k.startsWith('cm-')&&k!=='cm-device').sort().join(',')})
    ```
 
-**Expected result:** all three of these are true of the answer:
+**Expected result:** both of these are true of the answer:
 
 | Field | Must be |
 |---|---|
-| `pointerStillBroken` | `true` — the app did **not** overwrite the broken pointer with a new one |
-| `demoProjectInvented` | `false` — the app did **not** create a demo project |
-| `keysNow` vs `keysBefore` | **identical** lists (a `cm-device` entry may appear; anything starting `cm-proj-default` or `cm-ws-proj-default` is a FAIL) |
+| `pointerStillBroken` | `true` — the app did **not** overwrite the broken pointer |
+| `keyListIdentical` | `true` — not one stored record was added, removed or renamed |
 
-> Before the fix, `pointerStillBroken` would have been `false` and
-> `demoProjectInvented` would have been `true`. That is the whole bug.
+> **Why this is not checking for `cm-proj-proj-default` any more:** the original
+> version checked whether a `proj-default` record existed and expected `false`.
+> **That check was wrong for your browser** — you already have a real
+> `proj-default` project (it appears to be your 10-canvas legacy test project),
+> so that field would have read `true` and looked like a failure when nothing was
+> wrong. Comparing the whole list before and after is both stricter and correct.
+
+> Before the fix, `pointerStillBroken` would have been `false` and the list would
+> have gained new records. That is the whole bug.
 
 **Result:** ☐ PASS ☐ FAIL ☐ BLOCKED
 **Notes:**
@@ -251,7 +296,14 @@ and no canvas — so there is no control that could upload anything.
    localStorage.setItem('cm-meta', sessionStorage.getItem('fix4-backup')); 'pointer restored'
    ```
 
-2. **Reload the page.**
+   **Expected:** it prints `'pointer restored'`. If it prints `null` instead,
+   **stop and tell me** — do not reload. (This would mean the backup from C1 was
+   lost, e.g. because the tab was closed in between. Your data is still fine; I
+   will give you a different recovery line.)
+
+2. **⚠️ Turn your Wi-Fi / network back on.**
+
+3. **Reload the page.**
 
 **Expected result:** your project opens normally, with all canvases and all cards
 present, exactly as in B1. No blocking screen, no red banner.
@@ -394,17 +446,31 @@ error state. **No** blocking screen. Your cards stay on screen.
 1. Turn off your Wi-Fi.
 2. **Reload the page.**
 
-**Expected result:** one of two acceptable outcomes, depending on what your
-browser still has cached:
+> ## ⚠️ CORRECTED expected result — please re-run this one
+>
+> The original wording here was vague, and I have since measured what actually
+> happens. **Please re-run E2 and tell me which of these you see**, because it
+> decides an open design question (see §7, item 6).
 
-- **Either** your project opens from the local copy (with the sync chip showing
-  offline / local-only) — this is fine, the local read succeeded;
-- **or** the **blocking screen** appears — also fine, that means the cloud read
-  failed and the app correctly refused to guess.
+**Expected result:** the page is **blank for about 20–30 seconds** (the cloud
+connection timing out — do not reload during this), and then:
 
-**Unacceptable:** the demo project appearing, or an empty editable canvas.
+- your project **does** open from the local copy, **but with the red read-only
+  banner across the top**, and saving switched off.
 
-3. Reconnect and reload. Your project must open normally and completely.
+**Please record which you actually got:**
+
+- ☐ Red banner + my project visible, read-only (what I now expect)
+- ☐ Blocking screen ("Could not read your data")
+- ☐ Project opened normally, fully editable, no banner
+- ☐ Blank page even after 60+ seconds
+- ☐ Something else — describe it
+
+**Unacceptable in any case:** the starter demo project appearing, or an empty
+editable canvas.
+
+3. Reconnect and reload. Your project must open normally and completely, with no
+   banner.
 
 **Result:** ☐ PASS ☐ FAIL ☐ BLOCKED
 **Notes:**
@@ -468,18 +534,58 @@ are not forgotten.
    goes blank. The blocking screen only covers load failures that the load code
    detects.
 
+5. **A blank page for 20–30 seconds when the cloud is unreachable.** *(Found
+   while re-checking your test results — pre-existing, NOT caused by this fix.)*
+   The app waits for the cloud read with no time limit and renders nothing at all
+   until it either succeeds or gives up. So a flaky connection produces a blank
+   white page that is indistinguishable from the app being broken. My fix cannot
+   show its message until after that wait, because the decision it makes depends
+   on the answer. **Recommended follow-up:** give the cloud read a time limit
+   (about 8 seconds) and show "Loading…" instead of nothing. Small change, big
+   improvement in how the app *feels* when the network is poor. Awaiting your go-ahead.
+
+6. **OPEN DESIGN QUESTION: reloading with no internet now makes the app
+   read-only.** *(Found while re-checking your results.)* Before this fix, a
+   reload with no connection loaded your local copy and let you keep working,
+   saving locally and syncing later ("local-only" mode). Now the failed cloud
+   read counts as a critical failure, so you get the red banner and saving is
+   off. My view is that this is **too strict, and I recommend changing it** —
+   "the cloud is unreachable but my local copy is complete" is a different
+   situation from "part of my project failed to load", and only the second one
+   carries the risk of erasing something. See my message for the full reasoning
+   and the two options. **This needs your decision, not mine.**
+
 ---
 
 # 8. Sign-off
 
-| Group | Tests | Passed | Failed | Blocked |
-|---|---|---|---|---|
-| A — no regression for new users | 1 | | | |
-| B — normal healthy day | 3 | | | |
-| C — completely failed read | 4 | | | |
-| D — partly failed read | 4 | | | |
-| E — offline | 2 | | | |
-| **Total** | **14** | | | |
+| Group | Tests | Passed | Failed | Blocked | N/A |
+|---|---|---|---|---|---|
+| A — no regression for new users | 1 | | | | 1 (not testable on your setup) |
+| B — normal healthy day | 3 | 3 | | | |
+| C — completely failed read | 4 | | | | *re-run with corrected steps* |
+| D — partly failed read | 4 | 4 | | | |
+| E — offline | 2 | 1 (E1) | | | *E2 re-run requested* |
+| **Total** | **14** | | | | |
+
+### Round 1 results (recorded)
+
+| Test | Result | Note |
+|---|---|---|
+| A1 | **N/A** | Test invalid for a cloud-connected app — my error, you caught it |
+| B1, B2, B3 | **PASS** | No regression in normal use |
+| C1–C4 | **BLOCKED** | Test steps were wrong (needed the network off) — corrected above |
+| D1, D2, D3, D4 | **PASS** | **The most valuable result in this round** — see below |
+| E1 | **PASS** | |
+| E2 | **PASS**, re-run requested | Expected result was under-specified; needs the exact observation |
+
+**What Group D passing already proves**, on your real machine with your real
+cloud connection: the app detected an unreadable canvas, went read-only, did
+**not** invent anything, did **not** save an edit made in that state, did **not**
+shorten your project's canvas list, blocked **Sync now** from uploading, and gave
+everything back intact on repair. That is the core mechanism of this fix working
+end to end — it is not a small result, and it is independent of the broken C
+steps.
 
 **Tester:**
 **Date:**
