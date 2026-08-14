@@ -31,6 +31,16 @@ import { applyNodeUpdate, collectCloneInstances } from './nodeUpdate';
 import { DEFAULT_NEXT_ID, deriveNextId } from './cardId';
 import { auditProjectIds, summarizeAudit, SEVERITY } from './idAudit';
 import { snapshotBelongsToProject } from './history';
+import {
+  LOAD_OUTCOME,
+  classifyLoadOutcome,
+  mayCreateDefaultProject,
+  mayPersist,
+  mayUploadToCloud,
+  shouldBlockEditing,
+  describeLoadOutcome,
+  summarizeReadFailures,
+} from './loadOutcome';
 import { uploadImage as uploadImageToStorage, deleteImage as deleteImageFromStorage, deleteWorkspaceImages } from './imageStorageService';
 import {
   saveProjectMeta,
@@ -69,6 +79,10 @@ import {
   processRetryQueue,
   SCHEMA_VERSION,
   reconcileWorkspaceIds,
+  // --- Bug 42: tell "no data" apart from "couldn't read data" ---
+  beginReadSession,
+  getReadFailures,
+  recordReadFailure,
   // --- Phase 1 data-safety additions ---
   metaPath,
   tasksPath,
@@ -563,6 +577,44 @@ export default function WorkflowApp() {
   const justInitializedRef = useRef(false);
   // Guard: prevent autosave from uploading stale data if Firestore initial load failed
   const firestoreLoadSucceededRef = useRef(false);
+
+  // --- Bug 42: was the load trustworthy? ------------------------------------
+  // The old code only knew "I got projects" vs "I got no projects", and treated
+  // the second as a genuine first run. A failed read looked identical, so a
+  // network blip produced the default demo project, saved it, and uploaded it
+  // over real data. `loadOutcomeRef` records which of the FOUR possible
+  // situations actually happened (see src/loadOutcome.js).
+  //
+  // It starts INDETERMINATE deliberately: writes are refused until init() has
+  // positively established that the load was sound. Fail closed, not open.
+  const loadOutcomeRef = useRef(LOAD_OUTCOME.INDETERMINATE);
+  // Same value in state, for rendering. The ref is what write paths consult,
+  // because they need a synchronous answer that cannot be a render behind.
+  const [loadOutcome, setLoadOutcome] = useState(LOAD_OUTCOME.INDETERMINATE);
+  // Plain-language explanation shown to the user; null on a healthy load.
+  const [loadNotice, setLoadNotice] = useState(null);
+  // Which reads failed, for the "Technical details" list. Captured at load time
+  // rather than read during render, so the panel shows THIS load's failures.
+  const [loadFailureSummary, setLoadFailureSummary] = useState([]);
+
+  /**
+   * THE write gate. Every path that persists anything - localStorage, Firestore,
+   * autosave, manual sync, flush-on-close - must pass through this.
+   *
+   * Returns false after an indeterminate load (we do not know what the user has)
+   * and after a partial load (we hold an incomplete copy, and saving a subset is
+   * how you delete the rest).
+   */
+  const writesAllowed = () => mayPersist(loadOutcomeRef.current);
+
+  /**
+   * Stricter gate for anything that pushes to the CLOUD. In local-only mode
+   * (cloud unreachable, complete local copy) local saving is allowed but
+   * uploading is not: this session never learned what the cloud holds, so an
+   * upload would overwrite it blind. Those edits stay marked dirty and go up
+   * after the next healthy load.
+   */
+  const cloudUploadAllowed = () => mayUploadToCloud(loadOutcomeRef.current);
   // Ref to track activeProjectId without stale closures in debounced callbacks
   const activeProjectIdRef = useRef(null);
 
@@ -1005,6 +1057,38 @@ export default function WorkflowApp() {
 
   // --- Initialization & Auto-Save ---
   useEffect(() => {
+    /**
+     * Record the verdict on this load and put the app into the matching mode
+     * (Bug 42). Called exactly once per load, on every possible exit path,
+     * BEFORE anything is written.
+     */
+    // Token identifying THIS load's read failures. Taken before any read so the
+    // verdict below cannot be influenced by a previous load, or by a concurrent
+    // one (StrictMode runs this effect twice in development).
+    const readSession = beginReadSession();
+
+    const applyLoadOutcome = (outcome) => {
+      const failures = getReadFailures(readSession);
+      loadOutcomeRef.current = outcome;
+      setLoadOutcome(outcome);
+      const notice = describeLoadOutcome(outcome, failures);
+      setLoadNotice(notice);
+      const summary = summarizeReadFailures(failures);
+      setLoadFailureSummary(summary);
+      if (notice) {
+        console.error('[Load] %s: %s %s', notice.title, notice.detail, notice.action);
+        console.error('[Load] Failed reads:', summary);
+      }
+      if (!mayPersist(outcome)) {
+        // Second layer, independent of the write gate: also clear the flag that
+        // enables Firestore uploads, so even a code path that forgets to consult
+        // writesAllowed() cannot push to the cloud after a bad read.
+        firestoreLoadSucceededRef.current = false;
+        setSyncStatus('error');
+      }
+      return outcome;
+    };
+
     const init = async () => {
       try {
         // Try loading from Firestore first (primary data source)
@@ -1175,6 +1259,11 @@ export default function WorkflowApp() {
           } catch (e) {
             console.warn('[Firebase] Could not load from Firestore, falling back to localStorage:', e);
             setSyncStatus('error');
+            // Bug 42: this catch used to be cosmetic - it set a status label and
+            // fell through to the localStorage fallback, which on a fresh device
+            // finds nothing and therefore built the default demo project. Record
+            // the failure so the verdict below knows the cloud was never read.
+            recordReadFailure('firestore:loadSequence', e);
           }
         }
 
@@ -1255,6 +1344,23 @@ export default function WorkflowApp() {
           setSyncStatus('local-only');
         }
 
+        // === Bug 42: THE VERDICT ==============================================
+        // One classification point, before anything is written. Four possible
+        // answers, where the old code only understood two:
+        //
+        //   LOADED_COMPLETE  - data, no failed reads          -> normal operation
+        //   LOADED_PARTIAL   - data, but a read failed        -> show it, read-only
+        //   EMPTY_CONFIRMED  - no data, no failed reads       -> genuine first run
+        //   INDETERMINATE    - no data because a read failed  -> refuse everything
+        //
+        // Everything downstream (default-project creation, the migration
+        // write-back, autosave, manual sync, flush-on-close) is gated on this.
+        const loadedCount = loadedProjects ? loadedProjects.length : 0;
+        const outcome = applyLoadOutcome(classifyLoadOutcome({
+          projectCount: loadedCount,
+          readFailures: getReadFailures(readSession),
+        }));
+
         if (loadedProjects && loadedProjects.length > 0) {
           const parsedProjects = loadedProjects;
 
@@ -1289,7 +1395,12 @@ export default function WorkflowApp() {
 
           // Persist field additions to per-workspace keys if needed.
           // Reference tabs never write the shared cache (read-only).
-          if ((needsSave || migrationNeeded) && !isReferenceMode) {
+          // Bug 42: also skipped after a PARTIAL load. This block rewrites every
+          // project's workspaceIds from the workspaces it managed to load, so
+          // running it when a workspace read failed would erase that workspace
+          // from the project's own index - turning a transient read error into
+          // permanent local data loss.
+          if ((needsSave || migrationNeeded) && !isReferenceMode && mayPersist(outcome)) {
             for (const proj of fullyMigrated) {
               const wsIds = (proj.workspaces || []).map(ws => ws.id);
               // Preserve existing localStorage password hash if the in-memory
@@ -1332,7 +1443,11 @@ export default function WorkflowApp() {
           // shared active-project pointer (that would disrupt an editor tab on
           // this same device).
           const activeId = routeDisplayProjectId || resolvedDefaultId;
-          if (!isReferenceMode) {
+          // Bug 42: after a partial load this pointer may name a project we only
+          // half-read, and `resolvedDefaultId` may have fallen back to
+          // fullyMigrated[0] because the real default failed to load. Writing
+          // either would corrupt the pointer for the next (healthy) session.
+          if (!isReferenceMode && mayPersist(outcome)) {
             saveMeta({ activeProjectId: activeId, defaultProjectId: resolvedDefaultId, schemaVersion: 2 });
           }
           setActiveProjectId(activeId);
@@ -1411,13 +1526,32 @@ export default function WorkflowApp() {
           if (defaultProjIdx >= 0 && fullyMigrated[defaultProjIdx].password) {
             fullyMigrated[defaultProjIdx] = { ...fullyMigrated[defaultProjIdx], password: '' };
             // Save updated project meta without password
-            const projMetaUpdate = loadProjectMeta(resolvedDefaultId);
+            // Bug 42: no metadata writes after an untrustworthy load.
+            const projMetaUpdate = mayPersist(outcome) ? loadProjectMeta(resolvedDefaultId) : null;
             if (projMetaUpdate) {
               saveProjectMeta(resolvedDefaultId, { ...projMetaUpdate, password: '' });
             }
           }
+        } else if (!mayCreateDefaultProject(outcome)) {
+          // === Bug 42: THE FIX ================================================
+          // We have no data, and the reason is that a read FAILED - not that the
+          // user has nothing. This is the branch that used to build the default
+          // demo project, write it to localStorage, and arm autosave on it, which
+          // then uploaded the demo project over the user's real cloud data.
+          //
+          // So: do nothing. No default project, no state, no localStorage write,
+          // no cm-meta pointer. `workspaces` stays [] (its initial value), so the
+          // canvas shows nothing rather than showing demo content that looks like
+          // the user's project has been emptied. applyLoadOutcome has already put
+          // the app into its blocked, non-writing mode and set the notice the
+          // user sees. The only way out is a reload, which is the correct action.
+          console.error(
+            '[Load] Refusing to create a default project: the load was indeterminate, ' +
+            'so an empty result cannot be trusted to mean "no data". Nothing was written.'
+          );
         } else {
-          // No data found anywhere - create a default project
+          // No data found anywhere, and every critical read succeeded - a genuine
+          // first run. This is now the ONLY path that creates a default project.
           const defaultProject = {
             id: 'proj-default',
             name: 'Default',
@@ -1454,24 +1588,25 @@ export default function WorkflowApp() {
           saveMeta({ activeProjectId: 'proj-default', defaultProjectId: 'proj-default', schemaVersion: 2 });
         }
       } catch (e) {
-        const defaultProject = {
-          id: 'proj-default',
-          name: 'Default',
-          password: '',
-          description: '',
-          thumbnail: null,
-          lastModified: Date.now(),
-          workspaces: defaultWorkspaces,
-          activeTab: 'ws-1',
-          nextId: 10
-        };
-      setProjects([defaultProject]);
-      setActiveProjectId('proj-default');
-      setDefaultProjectId('proj-default');
-      setWorkspaces(defaultWorkspaces);
-      setActiveTab('ws-1');
-      setNextId(10);
-      saveMeta({ activeProjectId: 'proj-default', defaultProjectId: 'proj-default', schemaVersion: 2 });
+        // === Bug 42: the worst offender ======================================
+        // This catch-all used to replace all state with the default demo project
+        // and write cm-meta to point at it. Anything that threw anywhere in
+        // init() landed here - including a localStorage quota error from
+        // saveProjectMeta / saveWorkspaceToLocal, which are not try-wrapped. The
+        // user's real project was then one autosave away from being overwritten
+        // by demo content.
+        //
+        // An exception means we do not know how far the load got or which state
+        // setters already ran, so there is no safe interpretation. Write nothing
+        // and block. `classifyLoadOutcome` returns INDETERMINATE for threw:true
+        // regardless of how many projects were collected first.
+        console.error('[Load] init() threw; treating the load as indeterminate and writing nothing:', e);
+        recordReadFailure('init:exception', e);
+        applyLoadOutcome(classifyLoadOutcome({
+          projectCount: 0,
+          readFailures: getReadFailures(readSession),
+          threw: true,
+        }));
       }
       justInitializedRef.current = true;
       // Check dirty flag: if a previous session's flush was interrupted, schedule a
@@ -1479,8 +1614,17 @@ export default function WorkflowApp() {
       // Reference tabs must never push: skip the recovery sync entirely and leave
       // the dirty flag untouched so an editor tab (this or another device) still
       // performs the recovery. A reference tab reads only.
+      // Bug 42: both branches below are now gated on the load verdict.
+      //   - The recovery sync calls manualServerSync, which uploads whatever is
+      //     in localStorage WITHOUT consulting dirty flags. After an
+      //     indeterminate read that could push a default or half-read project
+      //     over good cloud data. This was the specific hole behind "manual sync
+      //     uses the same path, so it does not protect me".
+      //   - Clearing the flag is itself a destructive write: the flag is the only
+      //     record that a previous session had unsynced edits. If we cannot sync,
+      //     we must LEAVE it set so a later healthy session still recovers.
       const dirtyFlag = localStorage.getItem('cm-dirty-flag');
-      if (dirtyFlag && isFirebaseConfigured() && firestoreLoadSucceededRef.current && !isReferenceMode) {
+      if (dirtyFlag && isFirebaseConfigured() && firestoreLoadSucceededRef.current && !isReferenceMode && writesAllowed()) {
         // Schedule a recovery sync after a short delay to allow React state to settle
         setTimeout(() => {
           const meta = loadMeta();
@@ -1501,11 +1645,13 @@ export default function WorkflowApp() {
             localStorage.removeItem('cm-dirty-flag');
           }
         }, 2000);
-      } else if (!isReferenceMode) {
+      } else if (!isReferenceMode && writesAllowed()) {
         // No dirty flag or no Firebase configured - clear unconditionally.
         // Reference tabs never touch the dirty flag: an editor tab (here or on
         // another device) owns recovery, so a read-only viewer must not clear it.
         localStorage.removeItem('cm-dirty-flag');
+      } else if (dirtyFlag && !writesAllowed()) {
+        console.warn('[Load] Unsynced edits from a previous session are still pending, but this load was not trustworthy. Leaving the dirty flag set for a later healthy session.');
       }
       setInitialized(true);
     };
@@ -1677,6 +1823,10 @@ export default function WorkflowApp() {
   // Called on return-to-tab / focus / reconnect and on the heartbeat safety net.
   const pushDirtyNow = useCallback(async () => {
     if (!isFirebaseConfigured() || !firestoreLoadSucceededRef.current) return;
+    // Bug 42: explicit, in addition to the firestoreLoadSucceededRef guard above
+    // (which applyLoadOutcome also clears). This one calls manualServerSync, so
+    // it gets the same treatment as every other route into that function.
+    if (!writesAllowed()) return;
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     const projectId = activeProjectIdRef.current;
     if (!projectId || !hasDirtyDocs(projectId)) return;
@@ -1878,7 +2028,13 @@ export default function WorkflowApp() {
       if (document.visibilityState === 'visible') {
         pushDirtyNow();
         // Auto version snapshot (throttled to ~10 min, only after a real sync).
-        maybeSnapshot(activeProjectIdRef.current, 'auto').catch(() => {});
+        // Bug 42: createSnapshot is a CLOUD write. In practice maybeSnapshot's
+        // own "only after a successful sync" guard already blocks it after a bad
+        // load, but relying on that is relying on a coincidence - gate it here
+        // explicitly like every other write path.
+        if (cloudUploadAllowed()) {
+          maybeSnapshot(activeProjectIdRef.current, 'auto').catch(() => {});
+        }
       }
     }, HEARTBEAT_MS);
 
@@ -1967,10 +2123,18 @@ export default function WorkflowApp() {
   // --- Retry Queue: process on init and on 'online' event ---
   useEffect(() => {
     if (!initialized) return;
+    // Bug 42: the retry queue drains INTO THE CLOUD, so it needs the upload gate,
+    // not the local one. After an untrustworthy load we do not know whether a
+    // queued write is still correct, and in local-only mode we have not read the
+    // cloud at all - either way the queue waits. It survives in localStorage and
+    // a later healthy session drains it.
+    // (Reference-mode gating for this same function belongs to Fix 6.)
+    if (!cloudUploadAllowed()) return;
     // Process any queued failed writes after successful init
     processRetryQueue();
 
     const handleOnline = () => {
+      if (!cloudUploadAllowed()) return;
       console.info('[PersistenceService] Browser is online, processing retry queue...');
       processRetryQueue();
     };
@@ -2117,6 +2281,10 @@ export default function WorkflowApp() {
     const DIRTY_FLAG_KEY = 'cm-dirty-flag';
 
     const handleBeforeUnload = () => {
+      // Bug 42: after an untrustworthy load there is nothing legitimate to
+      // flush, and setting the dirty flag would make the NEXT session run a
+      // recovery sync that uploads this session's untrusted state.
+      if (!writesAllowed()) return;
       // Set dirty flag BEFORE flushing so that if flush is killed mid-flight,
       // the next session knows data may be stale and can re-sync.
       localStorage.setItem(DIRTY_FLAG_KEY, String(Date.now()));
@@ -2130,6 +2298,7 @@ export default function WorkflowApp() {
     };
 
     const handleVisibilityChange = () => {
+      if (!writesAllowed()) return; // Bug 42: see handleBeforeUnload
       if (document.visibilityState === 'hidden') {
         localStorage.setItem(DIRTY_FLAG_KEY, String(Date.now()));
         try {
@@ -2186,6 +2355,11 @@ export default function WorkflowApp() {
   useEffect(() => {
     if (!initialized || !activeProjectId) return;
     if (isPreviewMode) return; // No saves in Preview Mode
+    // Bug 42: the load was not trustworthy, so nothing in React state is known
+    // to be the user's data. Note this blocks the IMMEDIATE localStorage write
+    // below as well as the upload - the localStorage write was completely
+    // unguarded before, and it is what poisons the cache that later syncs read.
+    if (!writesAllowed()) return;
 
     // --- IMMEDIATE localStorage save (workspace documents only) ---
     const currentWorkspaces = workspaces;
@@ -2312,6 +2486,7 @@ export default function WorkflowApp() {
   useEffect(() => {
     if (!initialized || !activeProjectId) return;
     if (isPreviewMode) return;
+    if (!writesAllowed()) return; // Bug 42: no pointer writes after a bad load
     // Save activeTab to local project metadata (for resume on reload)
     const projMeta = loadProjectMeta(activeProjectId);
     if (projMeta && projMeta.activeTab !== activeTab) {
@@ -2333,6 +2508,9 @@ export default function WorkflowApp() {
   useEffect(() => {
     if (!initialized || !activeProjectId) return;
     if (isPreviewMode) return; // No saves in Preview Mode
+    // Bug 42: a failed task read yields `tasks: []`. Without this gate the line
+    // below writes that empty list straight over a real task list.
+    if (!writesAllowed()) return;
 
     // --- IMMEDIATE localStorage save (task document only) ---
     const tasksData = { tasks, taskGroups };
@@ -2388,6 +2566,10 @@ export default function WorkflowApp() {
   useEffect(() => {
     if (!initialized || !activeProjectId) return;
     if (isPreviewMode) return; // No saves in Preview Mode
+    // Bug 42: nextId in particular must not be written back after a bad load -
+    // a default nextId of 10 over a project already using id 152 would hand out
+    // colliding ids (contained by the Fix 2 live-data floor, but still wrong).
+    if (!writesAllowed()) return;
 
     // --- IMMEDIATE localStorage save ---
     const projMeta = loadProjectMeta(activeProjectId);
@@ -2434,6 +2616,10 @@ export default function WorkflowApp() {
   useEffect(() => {
     if (!initialized || !activeProjectId) return;
     if (isReferenceMode) return; // read-only viewer: never writes password/meta
+    // Bug 42: this effect writes project metadata to Firestore WITHOUT checking
+    // firestoreLoadSucceededRef, so it was the one autosave that could upload
+    // after a failed load. The write gate closes that hole too.
+    if (!writesAllowed()) return;
     setProjects(prev => prev.map(p => p.id === activeProjectId
       ? { ...p, password: storedPassword }
       : p
@@ -2442,7 +2628,11 @@ export default function WorkflowApp() {
     if (projMeta) {
       const updatedMeta = { ...projMeta, password: storedPassword };
       saveProjectMeta(activeProjectId, updatedMeta);
-      if (isFirebaseConfigured()) {
+      // Bug 42 / Option A: the LOCAL write above is fine in offline mode, but the
+      // cloud write needs the stricter gate. Without this, local-only mode
+      // attempted an upload, failed, and queued it in the retry queue - caught by
+      // the L1 verification, which expected no upload attempt at all.
+      if (isFirebaseConfigured() && cloudUploadAllowed()) {
         saveProjectToFirestore(activeProjectId, updatedMeta).catch(() => {});
       }
     }
@@ -4969,7 +5159,8 @@ export default function WorkflowApp() {
     if (projMeta) {
       const updatedMeta = { ...projMeta, password: newPass };
       saveProjectMeta(activeProjectId, updatedMeta);
-      if (isFirebaseConfigured()) saveProjectToFirestore(activeProjectId, updatedMeta).catch(() => {});
+      // Bug 42: cloud write needs the upload gate (see the password effect).
+      if (isFirebaseConfigured() && cloudUploadAllowed()) saveProjectToFirestore(activeProjectId, updatedMeta).catch(() => {});
     }
     setShowProjectPanel(false);
     setProjectPasswordInput('');
@@ -4980,6 +5171,14 @@ export default function WorkflowApp() {
   // --- Canvas Switch Handler (force-saves before switching) ---
   const handleCanvasSwitch = useCallback(async (targetWorkspaceId) => {
     if (targetWorkspaceId === activeTabRef.current) return;
+
+    // Bug 42: switching canvases must stay possible after a partial load (the
+    // user needs to look around and copy things out) but must not save or flush.
+    // Skip straight to the switch.
+    if (!writesAllowed()) {
+      setActiveTab(targetWorkspaceId);
+      return;
+    }
 
     // 1. Immediately save the active workspace to localStorage (the one being switched away from)
     const activeWs = workspaces.find(ws => ws.id === activeTabRef.current);
@@ -4998,7 +5197,10 @@ export default function WorkflowApp() {
     }
 
     // 2. Flush pending Firestore debounce timers (await the server write)
-    if (isFirebaseConfigured()) {
+    // Bug 42: nothing is ever scheduled in local-only mode, so this would flush
+    // nothing - but gate it anyway so the status chip does not claim to be
+    // syncing when uploads are switched off.
+    if (isFirebaseConfigured() && cloudUploadAllowed()) {
       setSyncStatus('syncing');
       try {
         await flushPendingServerSaves();
@@ -5016,6 +5218,26 @@ export default function WorkflowApp() {
   const handleManualServerSync = useCallback(async () => {
     if (!isFirebaseConfigured() || !activeProjectId) return;
     if (isReferenceMode) return; // read-only viewer never pushes to the server
+    // Bug 42: manualServerSync re-reads localStorage and uploads it WITHOUT
+    // consulting dirty flags, so it is the most destructive write path in the
+    // app. It must respect the load verdict like everything else - the owner
+    // specifically noted that manual sync "uses the same path, so it does not
+    // protect me".
+    // Bug 42: uploading needs the STRICTER gate. In local-only mode writes are
+    // allowed (locally) but an upload would overwrite the cloud blind, so it is
+    // refused - with instructions, because getting these edits to the cloud is
+    // exactly what the user is trying to do.
+    if (!cloudUploadAllowed()) {
+      setErrorMessage(
+        loadOutcomeRef.current === LOAD_OUTCOME.LOADED_LOCAL_ONLY
+          ? 'You are working offline, so there is nothing to sync to yet. Your changes ARE saved on this ' +
+            'device. Once you are back online, reload this page and they will be uploaded automatically. ' +
+            'Do that before opening the app in another tab or on another device.'
+          : 'Sync is switched off because this tab could not load your data properly. ' +
+            'Nothing has been uploaded. Please reload the page and try again.'
+      );
+      return;
+    }
     setSyncStatus('syncing');
     try {
       const success = await manualServerSync(activeProjectId);
@@ -6973,6 +7195,58 @@ export default function WorkflowApp() {
 
   const stats = getCardStats();
 
+  // --- Bug 42: load-failure gate -------------------------------------------
+  // MUST come before the `!activeWs -> return null` bail-out below. After an
+  // indeterminate load there is deliberately no project and therefore no active
+  // workspace, so that bail-out would render a blank white page - which is the
+  // single most alarming thing we could show someone whose data we just failed
+  // to read, and indistinguishable from the app being broken.
+  //
+  // We hold NO trustworthy data (`workspaces` is still []) and we have not
+  // created a default project. Nothing has been written, and nothing will be,
+  // because every write path consults writesAllowed(). Say so plainly and offer
+  // the one action that can help: a reload.
+  if (initialized && shouldBlockEditing(loadOutcome) && loadNotice) {
+    return (
+      <div className="flex items-center justify-center h-screen w-full bg-[#f8fafc] font-sans text-slate-800 p-6">
+        <div className="max-w-lg w-full bg-white rounded-2xl shadow-xl border border-red-200 p-6 sm:p-8">
+          <div className="flex items-start gap-3 mb-4">
+            <div className="shrink-0 w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+              <AlertTriangle className="w-5 h-5 text-red-600" />
+            </div>
+            <div>
+              <h1 className="text-lg font-bold text-slate-800">{loadNotice.title}</h1>
+              <p className="text-xs text-slate-500 mt-0.5">Your data has not been changed.</p>
+            </div>
+          </div>
+
+          <p className="text-sm text-slate-600 leading-relaxed mb-3">{loadNotice.detail}</p>
+
+          <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3 mb-4">
+            <p className="text-sm text-emerald-900 leading-relaxed font-medium">{loadNotice.action}</p>
+          </div>
+
+          <button
+            onClick={() => window.location.reload()}
+            className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm rounded-xl shadow-md transition-colors flex items-center justify-center gap-2"
+          >
+            <RefreshCw className="w-4 h-4" /> Reload and try again
+          </button>
+
+          {/* Technical detail, for reporting the problem rather than acting on it. */}
+          <details className="mt-4">
+            <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-600">Technical details</summary>
+            <ul className="mt-2 text-xs text-slate-500 font-mono space-y-1">
+              {loadFailureSummary.map(f => (
+                <li key={f.source}>{f.source} &times;{f.count} ({f.severity})</li>
+              ))}
+            </ul>
+          </details>
+        </div>
+      </div>
+    );
+  }
+
   if (!initialized || !activeWs) return null;
 
 
@@ -7374,6 +7648,48 @@ export default function WorkflowApp() {
   return (
     <div className="flex flex-col h-screen w-full bg-[#f8fafc] font-sans text-slate-800 selection:bg-indigo-100 overflow-hidden">
 
+      {/* --- Bug 42: partial-load (read-only) banner --- */}
+      {/* Real data loaded, but at least one critical read failed, so this copy is
+          incomplete. It is worth showing - the user may want to read or copy from
+          it - but saving stays off, because uploading a project with a missing
+          canvas is how that canvas gets deleted on the server. */}
+      {/* --- Bug 42: local-only (offline) banner --- */}
+      {/* The cloud was unreachable but the local copy is COMPLETE, so editing is
+          allowed and saved to this device. Amber, not red: nothing is wrong with
+          the data. The warning that matters is about the two copies drifting
+          apart, so it names the exact precondition - sync before using another
+          tab or device. */}
+      {loadNotice && loadOutcome === LOAD_OUTCOME.LOADED_LOCAL_ONLY && !isFocusMode && (
+        <div className="shrink-0 flex items-center justify-center gap-2 sm:gap-3 px-3 py-1.5 bg-amber-100 border-b border-amber-300 text-amber-900 text-xs sm:text-sm font-semibold z-[60]">
+          <CloudOff className="w-4 h-4 shrink-0" />
+          <span className="truncate" title={`${loadNotice.detail} ${loadNotice.action}`}>
+            Working offline — saved on this device only. Keep a backup. Reconnect and reload before using
+            another tab or device.
+          </span>
+          <button
+            onClick={() => window.location.reload()}
+            className="shrink-0 px-2 py-0.5 rounded-md bg-amber-200 hover:bg-amber-300 text-amber-900 text-xs font-bold transition-colors"
+          >
+            Reload
+          </button>
+        </div>
+      )}
+
+      {loadNotice && loadOutcome === LOAD_OUTCOME.LOADED_PARTIAL && !isFocusMode && (
+        <div className="shrink-0 flex items-center justify-center gap-2 sm:gap-3 px-3 py-1.5 bg-red-100 border-b border-red-300 text-red-900 text-xs sm:text-sm font-semibold z-[60]">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span className="truncate" title={`${loadNotice.detail} ${loadNotice.action}`}>
+            {loadNotice.title}. Saving is OFF so nothing can be erased - reload to fix.
+          </span>
+          <button
+            onClick={() => window.location.reload()}
+            className="shrink-0 px-2 py-0.5 rounded-md bg-red-200 hover:bg-red-300 text-red-900 text-xs font-bold transition-colors"
+          >
+            Reload
+          </button>
+        </div>
+      )}
+
       {/* --- Reference (read-only) banner --- */}
       {isReferenceMode && !isFocusMode && (
         <div className="shrink-0 flex items-center justify-center gap-2 sm:gap-3 px-3 py-1.5 bg-amber-100 border-b border-amber-300 text-amber-900 text-xs sm:text-sm font-semibold z-[60]">
@@ -7632,6 +7948,26 @@ export default function WorkflowApp() {
                         <button
                           onClick={async () => {
                             if (isReferenceMode) return; // read-only viewer never pushes
+                            // Bug 42: this button used to set
+                            // firestoreLoadSucceededRef = true unconditionally,
+                            // deliberately overriding the failed-load guard. One
+                            // click after an offline or permission-denied boot
+                            // would upload whatever was in localStorage - quite
+                            // possibly the default demo project - over the real
+                            // cloud data. The override is now conditional on the
+                            // load actually having been trustworthy.
+                            if (!cloudUploadAllowed()) {
+                              setErrorMessage(
+                                loadOutcomeRef.current === LOAD_OUTCOME.LOADED_LOCAL_ONLY
+                                  ? 'You are working offline, so there is nothing to sync to yet. Your changes ARE ' +
+                                    'saved on this device. Once you are back online, reload this page and they will ' +
+                                    'be uploaded automatically. Do that before opening the app in another tab or ' +
+                                    'on another device.'
+                                  : 'Sync is switched off because this tab could not load your data properly. ' +
+                                    'Nothing has been uploaded. Please reload the page and try again.'
+                              );
+                              return;
+                            }
                             setSyncStatus('syncing');
                             try {
                               firestoreLoadSucceededRef.current = true;
