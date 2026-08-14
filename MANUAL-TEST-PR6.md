@@ -211,10 +211,12 @@ Saving is working normally.
    design.)
 
    ```
-   sessionStorage.setItem('fix4-keys', Object.keys(localStorage).filter(k=>k.startsWith('cm-')&&k!=='cm-device'&&!k.startsWith('cm-debug')).sort().join(',')); sessionStorage.getItem('fix4-keys')
+   (()=>{const snap={};Object.keys(localStorage).filter(k=>k.startsWith('cm-')&&k!=='cm-device'&&!k.startsWith('cm-debug')).sort().forEach(k=>{snap[k]=localStorage.getItem(k)});sessionStorage.setItem('fix4-snap',JSON.stringify(snap));return 'snapshot taken: '+Object.keys(snap).length+' records'})()
    ```
 
-   **Expected:** a list of names starting with `cm-`. Leave it on screen.
+   **Expected:** `snapshot taken: NN records`. This records the full *contents* of
+   every stored record, not just their names, so C2 can prove nothing was
+   rewritten in place.
 
 4. **⚠️ CORRECTED STEP — turn the cloud-failure switch ON** (do **not** touch your
    Wi-Fi):
@@ -250,28 +252,54 @@ localStorage:meta ×1 (critical)
 **Preconditions:** you are looking at the blocking screen from C1. **Do not
 reload yet.**
 
+> ## ⚠️ CORRECTED AGAIN — the previous version of this test was broken
+>
+> **My bug, not the app's.** Your run returned `keyListIdentical: false`, and the
+> reason is visible in your own output: the list contained
+> `cm-debug-simulate-cloud-failure` — **the testing switch you had just turned
+> on.** The "before" line filtered that key out; this comparison line did not. The
+> two lists could therefore never match. Nothing was actually wrong.
+>
+> Rather than just patch the filter, this test is now **stronger**: it compares the
+> full *contents* of every stored record before and after, so it detects a changed
+> value as well as an added or removed key. The old version could not have caught
+> a record being silently rewritten in place.
+
+**Preconditions:** you are looking at the blocking screen from C1. **Do not
+reload yet.**
+
 1. Open the Console and paste this line:
 
    ```
-   JSON.stringify({pointerStillBroken: localStorage.getItem('cm-meta')==='BROKEN{{{', keyListIdentical: sessionStorage.getItem('fix4-keys')===Object.keys(localStorage).filter(k=>k.startsWith('cm-')&&k!=='cm-device').sort().join(','), keysNow: Object.keys(localStorage).filter(k=>k.startsWith('cm-')&&k!=='cm-device').sort().join(',')})
+   (()=>{const before=JSON.parse(sessionStorage.getItem('fix4-snap')||'{}');const after={};Object.keys(localStorage).filter(k=>k.startsWith('cm-')&&k!=='cm-device'&&!k.startsWith('cm-debug')).sort().forEach(k=>{after[k]=localStorage.getItem(k)});const added=Object.keys(after).filter(k=>!(k in before));const removed=Object.keys(before).filter(k=>!(k in after));const changed=Object.keys(before).filter(k=>k in after&&before[k]!==after[k]);return JSON.stringify({verdict:(added.length===0&&removed.length===0&&changed.length===0)?'NOTHING WAS WRITTEN - PASS':'SOMETHING CHANGED - send me this',pointerStillBroken:localStorage.getItem('cm-meta')==='BROKEN{{{',added,removed,changed})})()
    ```
 
-**Expected result:** both of these are true of the answer:
+**Expected result:**
+
+```
+{"verdict":"NOTHING WAS WRITTEN - PASS","pointerStillBroken":true,
+ "added":[],"removed":[],"changed":[]}
+```
 
 | Field | Must be |
 |---|---|
+| `verdict` | `NOTHING WAS WRITTEN - PASS` |
 | `pointerStillBroken` | `true` — the app did **not** overwrite the broken pointer |
-| `keyListIdentical` | `true` — not one stored record was added, removed or renamed |
+| `added` / `removed` / `changed` | all empty lists |
 
-> **Why this is not checking for `cm-proj-proj-default` any more:** the original
-> version checked whether a `proj-default` record existed and expected `false`.
-> **That check was wrong for your browser** — you already have a real
-> `proj-default` project (it appears to be your 10-canvas legacy test project),
-> so that field would have read `true` and looked like a failure when nothing was
-> wrong. Comparing the whole list before and after is both stricter and correct.
+> If `added`, `removed` or `changed` lists anything, **send me the whole line** —
+> that is a genuine write leak and I want to see exactly which record moved.
 
-> Before the fix, `pointerStillBroken` would have been `false` and the list would
-> have gained new records. That is the whole bug.
+> **A note on two keys you may have wondered about.** Your earlier run showed
+> `cm-retry-queue` present when an older list did not have it. That one is
+> legitimate: it is the queue of uploads that failed while you were offline during
+> the Group E tests, and it is created by a *failed upload attempt*, not by a
+> blocked load. This content-level check would flag it if it ever changed during a
+> blocked load. `cm-device` is excluded because the app rewrites it on every load
+> by design, and it holds nothing but this device's name.
+
+> Before the fix, `pointerStillBroken` would have been `false` and `added` would
+> have listed brand-new demo-project records. That is the whole bug.
 
 **Result:** ☐ PASS ☐ FAIL ☐ BLOCKED
 **Notes:**
@@ -497,14 +525,57 @@ banner across the top and saving is switched off.**
 
 **Expected:** normal operation returns, no banner, saving works again.
 
-**Now the question for you.** Before this fix, this situation let you keep working
-offline and saving locally, syncing when the connection came back. Now it is
-read-only. Which do you want?
+> ## ✅ ANSWERED — Option A chosen and built. Please re-run E2b.
+>
+> You picked Option A with a warning, so the expected result above has **changed**.
+> Re-run E2b and check against the new expectations below.
 
-- ☐ **Option A (I recommend this):** let me keep working offline — saving locally,
-  uploads still blocked, with a gentler "working offline, not synced" notice
-- ☐ **Option B:** leave it as it is — read-only whenever the cloud cannot be read
-- ☐ Not sure, talk me through it again
+## E2b (v2) — Offline editing is allowed, with a warning
+
+**Preconditions:** app loaded normally, healthy local data. Do **not** break the
+pointer.
+
+1. Turn the switch on: `localStorage.setItem('cm-debug-simulate-cloud-failure','1')`
+2. **Reload.**
+
+**Expected:** your project opens and looks correct, with an **amber** banner
+(not red) reading:
+
+> **Working offline — saved on this device only. Keep a backup. Reconnect and
+> reload before using another tab or device.**
+
+3. Add a card called `E2B CHECK`, wait 15 seconds, then reload (switch still on).
+
+**Expected:** `E2B CHECK` **is still there.** Offline edits now persist to this
+device — this is the change you asked for.
+
+4. Click the sync chip, then **Sync now**.
+
+**Expected:** a message saying you are working offline, your changes *are* saved
+on this device, and that reloading once you are back online will upload them
+automatically — and to do that before opening the app elsewhere.
+
+5. Turn the switch off and reload:
+   `localStorage.removeItem('cm-debug-simulate-cloud-failure')`
+
+**Expected:** the amber banner is gone, and **`E2B CHECK` is still present** and
+now syncs to the cloud. (Delete it afterwards if you don't want it.)
+
+**Result:** ☐ PASS ☐ FAIL ☐ BLOCKED
+**Notes:**
+
+## E2c — Offline with damaged local data must STILL be read-only
+
+Proves Option A did not weaken the real protection.
+
+1. `localStorage.setItem('cm-debug-simulate-cloud-failure','1')`
+2. Break one canvas, exactly as in D1 step 3 (the line that backs it up first).
+3. **Reload.**
+
+**Expected:** the **red** read-only banner, **not** the amber offline one. A piece
+of data really is missing here, so saving stays off.
+
+4. Restore the canvas (D4's line) and turn the switch off, then reload.
 
 **Result:** ☐ PASS ☐ FAIL ☐ BLOCKED
 **Notes:**
@@ -578,8 +649,34 @@ are not forgotten.
    (about 8 seconds) and show "Loading…" instead of nothing. Small change, big
    improvement in how the app *feels* when the network is poor. Awaiting your go-ahead.
 
-6. **OPEN DESIGN QUESTION: reloading with no internet now makes the app
-   read-only.** *(Found while re-checking your results.)* Before this fix, a
+6. **✅ RESOLVED — you chose Option A, and it is now implemented.**
+   Reloading with an unreachable cloud no longer makes the app read-only. A new
+   fifth state, `LOADED_LOCAL_ONLY`, covers "the cloud could not be reached, but
+   the local copy is complete":
+
+   - You **can** edit, and changes are saved to this device.
+   - Cloud uploads stay blocked — this session never learned what the cloud
+     holds, so uploading would overwrite it blind.
+   - An **amber** banner (not red) says: *"Working offline — saved on this device
+     only. Keep a backup. Reconnect and reload before using another tab or
+     device."*
+   - **Sync now** explains itself instead of silently refusing: it tells you the
+     changes are saved locally and will upload automatically once you reconnect
+     and reload.
+   - Your edits stay marked as unsynced, so the next healthy load uploads them.
+
+   Read-only is still used where a piece of data really is missing:
+   cloud unreachable **and** the local copy damaged, or a cloud *content* read
+   failing part-way through. Verified in a browser (L1–L3) and by 14 new unit tests.
+
+   **One bug this caught in my own work:** the first version of Option A let the
+   password effect attempt a cloud upload while offline, which failed and queued a
+   retry. Found by the L1 check expecting no upload attempt at all. Fixed, along
+   with two other paths that used the local gate where they needed the upload gate
+   (the retry-queue drain and the canvas-switch flush).
+
+   **The original problem, kept for the record:** reloading with no internet used
+   to make the app read-only. *(Found while re-checking your results.)* Before this fix, a
    reload with no connection loaded your local copy and let you keep working,
    saving locally and syncing later ("local-only" mode). Now the failed cloud
    read counts as a critical failure, so you get the red banner and saving is

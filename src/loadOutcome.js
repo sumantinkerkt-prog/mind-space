@@ -92,12 +92,48 @@ export const READ_SOURCE_SEVERITY = {
 };
 
 /**
- * The four states a load can end in. The old code only understood two of them
+ * Sources that mean "we never reached the cloud at all".
+ *
+ * These are the BOOTSTRAP reads. If one of them fails, the Firestore phase is
+ * abandoned before any cloud content is adopted, and the app falls back
+ * wholesale to its complete local copy. Nothing is half-loaded.
+ *
+ * This is categorically different from a cloud CONTENT read failing
+ * (firestore:workspace, firestore:tasks, firestore:project), which means we
+ * committed to the cloud as the source of truth and then lost a piece of it -
+ * leaving genuinely incomplete data that must not be saved.
+ *
+ * Conflating the two was a real mistake in the first version of this fix: it
+ * made a simple offline reload switch the whole app to read-only, when the local
+ * copy was complete and perfectly safe to edit.
+ */
+export const CLOUD_BOOTSTRAP_SOURCES = [
+  'firestore:userMeta',     // gates the entire Firestore phase
+  'firestore:allProjects',  // the project list
+  'firestore:loadSequence', // the outer catch around the whole cloud phase
+];
+
+/** True if every blocking failure was a "could not reach the cloud" failure. */
+export function onlyCloudBootstrapFailed(readFailures) {
+  const blocking = criticalFailures(readFailures);
+  if (blocking.length === 0) return false;
+  return blocking.every(f => CLOUD_BOOTSTRAP_SOURCES.includes(f && f.source));
+}
+
+/**
+ * The five states a load can end in. The old code only understood two of them
  * ("got projects" / "did not get projects"), which is the whole bug.
  */
 export const LOAD_OUTCOME = {
   /** Data loaded and every critical read succeeded. Normal operation. */
   LOADED_COMPLETE: 'loaded-complete',
+  /**
+   * The cloud could not be reached at all, so we loaded a COMPLETE copy from
+   * this device instead. Editing is safe and allowed - the data is whole, and
+   * it is saved locally. Cloud uploads stay blocked until a healthy load,
+   * because this session never learned what the cloud currently holds.
+   */
+  LOADED_LOCAL_ONLY: 'loaded-local-only',
   /**
    * Data loaded, but at least one critical read failed, so what we hold is an
    * INCOMPLETE picture. Dangerous to save: uploading a project whose 3rd
@@ -160,7 +196,14 @@ export function classifyLoadOutcome({ projectCount = 0, readFailures = [], threw
   const hasData = Number(projectCount) > 0;
 
   if (hasData) {
-    return blocking ? LOAD_OUTCOME.LOADED_PARTIAL : LOAD_OUTCOME.LOADED_COMPLETE;
+    if (!blocking) return LOAD_OUTCOME.LOADED_COMPLETE;
+    // We have data AND something failed. Which something decides everything:
+    //   - only the cloud was unreachable -> the local copy we fell back to is
+    //     whole, so this is offline working, not damaged data.
+    //   - anything else -> a piece is genuinely missing. Read-only.
+    return onlyCloudBootstrapFailed(readFailures)
+      ? LOAD_OUTCOME.LOADED_LOCAL_ONLY
+      : LOAD_OUTCOME.LOADED_PARTIAL;
   }
   return blocking ? LOAD_OUTCOME.INDETERMINATE : LOAD_OUTCOME.EMPTY_CONFIRMED;
 }
@@ -184,6 +227,22 @@ export function mayCreateDefaultProject(outcome) {
  *    subset is how you delete the rest.
  */
 export function mayPersist(outcome) {
+  return outcome === LOAD_OUTCOME.LOADED_COMPLETE ||
+         outcome === LOAD_OUTCOME.EMPTY_CONFIRMED ||
+         // Offline with a complete local copy: saving to THIS DEVICE is allowed
+         // and safe. Cloud uploads are governed separately by mayUploadToCloud.
+         outcome === LOAD_OUTCOME.LOADED_LOCAL_ONLY;
+}
+
+/**
+ * May the app push to the CLOUD?
+ *
+ * Stricter than mayPersist. Local-only mode never learned what the cloud
+ * currently holds, so uploading from it would mean overwriting the cloud blind.
+ * Those edits are kept, marked dirty, and uploaded after the next healthy load -
+ * which is why the local-only banner tells the user to reconnect and reload.
+ */
+export function mayUploadToCloud(outcome) {
   return outcome === LOAD_OUTCOME.LOADED_COMPLETE || outcome === LOAD_OUTCOME.EMPTY_CONFIRMED;
 }
 
@@ -233,6 +292,20 @@ export function describeLoadOutcome(outcome, readFailures) {
       action:
         'Nothing has been changed or saved, and nothing will be saved while this message is showing. ' +
         'Reload the page. If it happens again, check your internet connection before reloading.',
+    };
+  }
+  if (outcome === LOAD_OUTCOME.LOADED_LOCAL_ONLY) {
+    return {
+      tone: 'offline',
+      title: 'Working offline — saved on this device only',
+      detail:
+        'The cloud could not be reached, so this is the copy stored on this device. It is complete, ' +
+        'and you can edit normally. Your changes are being saved here, but they have NOT reached the cloud.' +
+        sourceNote,
+      action:
+        'Keep an export as backup. Before you open this app in another tab, or on another device, ' +
+        'reconnect and reload this page so these changes reach the cloud first — otherwise the two ' +
+        'copies will disagree.',
     };
   }
   if (outcome === LOAD_OUTCOME.LOADED_PARTIAL) {

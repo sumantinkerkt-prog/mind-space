@@ -36,6 +36,7 @@ import {
   classifyLoadOutcome,
   mayCreateDefaultProject,
   mayPersist,
+  mayUploadToCloud,
   shouldBlockEditing,
   describeLoadOutcome,
   summarizeReadFailures,
@@ -605,6 +606,15 @@ export default function WorkflowApp() {
    * how you delete the rest).
    */
   const writesAllowed = () => mayPersist(loadOutcomeRef.current);
+
+  /**
+   * Stricter gate for anything that pushes to the CLOUD. In local-only mode
+   * (cloud unreachable, complete local copy) local saving is allowed but
+   * uploading is not: this session never learned what the cloud holds, so an
+   * upload would overwrite it blind. Those edits stay marked dirty and go up
+   * after the next healthy load.
+   */
+  const cloudUploadAllowed = () => mayUploadToCloud(loadOutcomeRef.current);
   // Ref to track activeProjectId without stale closures in debounced callbacks
   const activeProjectIdRef = useRef(null);
 
@@ -2018,7 +2028,13 @@ export default function WorkflowApp() {
       if (document.visibilityState === 'visible') {
         pushDirtyNow();
         // Auto version snapshot (throttled to ~10 min, only after a real sync).
-        maybeSnapshot(activeProjectIdRef.current, 'auto').catch(() => {});
+        // Bug 42: createSnapshot is a CLOUD write. In practice maybeSnapshot's
+        // own "only after a successful sync" guard already blocks it after a bad
+        // load, but relying on that is relying on a coincidence - gate it here
+        // explicitly like every other write path.
+        if (cloudUploadAllowed()) {
+          maybeSnapshot(activeProjectIdRef.current, 'auto').catch(() => {});
+        }
       }
     }, HEARTBEAT_MS);
 
@@ -2107,16 +2123,18 @@ export default function WorkflowApp() {
   // --- Retry Queue: process on init and on 'online' event ---
   useEffect(() => {
     if (!initialized) return;
-    // Bug 42: the retry queue is a write path. After an untrustworthy load we do
-    // not know whether a queued write is still correct, so hold it - the queue
-    // survives in localStorage and a later healthy session drains it.
+    // Bug 42: the retry queue drains INTO THE CLOUD, so it needs the upload gate,
+    // not the local one. After an untrustworthy load we do not know whether a
+    // queued write is still correct, and in local-only mode we have not read the
+    // cloud at all - either way the queue waits. It survives in localStorage and
+    // a later healthy session drains it.
     // (Reference-mode gating for this same function belongs to Fix 6.)
-    if (!writesAllowed()) return;
+    if (!cloudUploadAllowed()) return;
     // Process any queued failed writes after successful init
     processRetryQueue();
 
     const handleOnline = () => {
-      if (!writesAllowed()) return;
+      if (!cloudUploadAllowed()) return;
       console.info('[PersistenceService] Browser is online, processing retry queue...');
       processRetryQueue();
     };
@@ -2610,7 +2628,11 @@ export default function WorkflowApp() {
     if (projMeta) {
       const updatedMeta = { ...projMeta, password: storedPassword };
       saveProjectMeta(activeProjectId, updatedMeta);
-      if (isFirebaseConfigured()) {
+      // Bug 42 / Option A: the LOCAL write above is fine in offline mode, but the
+      // cloud write needs the stricter gate. Without this, local-only mode
+      // attempted an upload, failed, and queued it in the retry queue - caught by
+      // the L1 verification, which expected no upload attempt at all.
+      if (isFirebaseConfigured() && cloudUploadAllowed()) {
         saveProjectToFirestore(activeProjectId, updatedMeta).catch(() => {});
       }
     }
@@ -5137,7 +5159,8 @@ export default function WorkflowApp() {
     if (projMeta) {
       const updatedMeta = { ...projMeta, password: newPass };
       saveProjectMeta(activeProjectId, updatedMeta);
-      if (isFirebaseConfigured()) saveProjectToFirestore(activeProjectId, updatedMeta).catch(() => {});
+      // Bug 42: cloud write needs the upload gate (see the password effect).
+      if (isFirebaseConfigured() && cloudUploadAllowed()) saveProjectToFirestore(activeProjectId, updatedMeta).catch(() => {});
     }
     setShowProjectPanel(false);
     setProjectPasswordInput('');
@@ -5174,7 +5197,10 @@ export default function WorkflowApp() {
     }
 
     // 2. Flush pending Firestore debounce timers (await the server write)
-    if (isFirebaseConfigured()) {
+    // Bug 42: nothing is ever scheduled in local-only mode, so this would flush
+    // nothing - but gate it anyway so the status chip does not claim to be
+    // syncing when uploads are switched off.
+    if (isFirebaseConfigured() && cloudUploadAllowed()) {
       setSyncStatus('syncing');
       try {
         await flushPendingServerSaves();
@@ -5197,10 +5223,18 @@ export default function WorkflowApp() {
     // app. It must respect the load verdict like everything else - the owner
     // specifically noted that manual sync "uses the same path, so it does not
     // protect me".
-    if (!writesAllowed()) {
+    // Bug 42: uploading needs the STRICTER gate. In local-only mode writes are
+    // allowed (locally) but an upload would overwrite the cloud blind, so it is
+    // refused - with instructions, because getting these edits to the cloud is
+    // exactly what the user is trying to do.
+    if (!cloudUploadAllowed()) {
       setErrorMessage(
-        'Sync is switched off because this tab could not load your data properly. ' +
-        'Nothing has been uploaded. Please reload the page and try again.'
+        loadOutcomeRef.current === LOAD_OUTCOME.LOADED_LOCAL_ONLY
+          ? 'You are working offline, so there is nothing to sync to yet. Your changes ARE saved on this ' +
+            'device. Once you are back online, reload this page and they will be uploaded automatically. ' +
+            'Do that before opening the app in another tab or on another device.'
+          : 'Sync is switched off because this tab could not load your data properly. ' +
+            'Nothing has been uploaded. Please reload the page and try again.'
       );
       return;
     }
@@ -7619,6 +7653,28 @@ export default function WorkflowApp() {
           incomplete. It is worth showing - the user may want to read or copy from
           it - but saving stays off, because uploading a project with a missing
           canvas is how that canvas gets deleted on the server. */}
+      {/* --- Bug 42: local-only (offline) banner --- */}
+      {/* The cloud was unreachable but the local copy is COMPLETE, so editing is
+          allowed and saved to this device. Amber, not red: nothing is wrong with
+          the data. The warning that matters is about the two copies drifting
+          apart, so it names the exact precondition - sync before using another
+          tab or device. */}
+      {loadNotice && loadOutcome === LOAD_OUTCOME.LOADED_LOCAL_ONLY && !isFocusMode && (
+        <div className="shrink-0 flex items-center justify-center gap-2 sm:gap-3 px-3 py-1.5 bg-amber-100 border-b border-amber-300 text-amber-900 text-xs sm:text-sm font-semibold z-[60]">
+          <CloudOff className="w-4 h-4 shrink-0" />
+          <span className="truncate" title={`${loadNotice.detail} ${loadNotice.action}`}>
+            Working offline — saved on this device only. Keep a backup. Reconnect and reload before using
+            another tab or device.
+          </span>
+          <button
+            onClick={() => window.location.reload()}
+            className="shrink-0 px-2 py-0.5 rounded-md bg-amber-200 hover:bg-amber-300 text-amber-900 text-xs font-bold transition-colors"
+          >
+            Reload
+          </button>
+        </div>
+      )}
+
       {loadNotice && loadOutcome === LOAD_OUTCOME.LOADED_PARTIAL && !isFocusMode && (
         <div className="shrink-0 flex items-center justify-center gap-2 sm:gap-3 px-3 py-1.5 bg-red-100 border-b border-red-300 text-red-900 text-xs sm:text-sm font-semibold z-[60]">
           <AlertTriangle className="w-4 h-4 shrink-0" />
@@ -7900,10 +7956,15 @@ export default function WorkflowApp() {
                             // possibly the default demo project - over the real
                             // cloud data. The override is now conditional on the
                             // load actually having been trustworthy.
-                            if (!writesAllowed()) {
+                            if (!cloudUploadAllowed()) {
                               setErrorMessage(
-                                'Sync is switched off because this tab could not load your data properly. ' +
-                                'Nothing has been uploaded. Please reload the page and try again.'
+                                loadOutcomeRef.current === LOAD_OUTCOME.LOADED_LOCAL_ONLY
+                                  ? 'You are working offline, so there is nothing to sync to yet. Your changes ARE ' +
+                                    'saved on this device. Once you are back online, reload this page and they will ' +
+                                    'be uploaded automatically. Do that before opening the app in another tab or ' +
+                                    'on another device.'
+                                  : 'Sync is switched off because this tab could not load your data properly. ' +
+                                    'Nothing has been uploaded. Please reload the page and try again.'
                               );
                               return;
                             }

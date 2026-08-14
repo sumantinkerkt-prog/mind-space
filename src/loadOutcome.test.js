@@ -8,6 +8,8 @@ import {
   classifyLoadOutcome,
   mayCreateDefaultProject,
   mayPersist,
+  mayUploadToCloud,
+  onlyCloudBootstrapFailed,
   shouldBlockEditing,
   summarizeReadFailures,
   describeLoadOutcome,
@@ -165,6 +167,105 @@ describe('mayCreateDefaultProject', () => {
     expect(mayCreateDefaultProject(LOAD_OUTCOME.LOADED_PARTIAL)).toBe(false);
     expect(mayCreateDefaultProject('something-else')).toBe(false);
     expect(mayCreateDefaultProject(undefined)).toBe(false);
+  });
+});
+
+// =============================================================================
+// LOADED_LOCAL_ONLY - offline with a complete local copy
+// =============================================================================
+
+describe('onlyCloudBootstrapFailed', () => {
+  it('is true when only the cloud bootstrap reads failed', () => {
+    expect(onlyCloudBootstrapFailed([failure('firestore:userMeta')])).toBe(true);
+    expect(onlyCloudBootstrapFailed([failure('firestore:allProjects')])).toBe(true);
+    expect(onlyCloudBootstrapFailed([failure('firestore:loadSequence')])).toBe(true);
+    expect(onlyCloudBootstrapFailed([failure('firestore:userMeta'), failure('firestore:loadSequence')])).toBe(true);
+  });
+
+  it('is false when a cloud CONTENT read failed (that is genuinely partial data)', () => {
+    expect(onlyCloudBootstrapFailed([failure('firestore:workspace')])).toBe(false);
+    expect(onlyCloudBootstrapFailed([failure('firestore:tasks')])).toBe(false);
+    expect(onlyCloudBootstrapFailed([failure('firestore:project')])).toBe(false);
+  });
+
+  it('is false when a LOCAL read failed, even alongside a cloud failure', () => {
+    // The local copy we fell back to is itself damaged - not safe to edit.
+    expect(onlyCloudBootstrapFailed([failure('firestore:userMeta'), failure('localStorage:workspace')])).toBe(false);
+    expect(onlyCloudBootstrapFailed([failure('firestore:userMeta'), failure('localStorage:meta')])).toBe(false);
+  });
+
+  it('ignores benign failures when deciding', () => {
+    expect(onlyCloudBootstrapFailed([failure('firestore:userMeta'), failure('localStorage:device')])).toBe(true);
+  });
+
+  it('is false when nothing blocking failed at all', () => {
+    expect(onlyCloudBootstrapFailed([])).toBe(false);
+    expect(onlyCloudBootstrapFailed([failure('localStorage:device')])).toBe(false);
+  });
+});
+
+describe('classifyLoadOutcome - local-only', () => {
+  it('cloud unreachable + complete local copy = LOADED_LOCAL_ONLY, not read-only', () => {
+    // The correction: a plain offline reload used to switch the whole app to
+    // read-only. The local copy is whole, so editing it is safe.
+    expect(classifyLoadOutcome({ projectCount: 3, readFailures: [failure('firestore:userMeta')] }))
+      .toBe(LOAD_OUTCOME.LOADED_LOCAL_ONLY);
+  });
+
+  it('cloud CONTENT read failed = still LOADED_PARTIAL (read-only)', () => {
+    // Here a piece really is missing, so saving could erase it.
+    expect(classifyLoadOutcome({ projectCount: 1, readFailures: [failure('firestore:workspace')] }))
+      .toBe(LOAD_OUTCOME.LOADED_PARTIAL);
+  });
+
+  it('cloud unreachable AND local copy damaged = LOADED_PARTIAL (read-only)', () => {
+    expect(classifyLoadOutcome({
+      projectCount: 2,
+      readFailures: [failure('firestore:userMeta'), failure('localStorage:workspace')],
+    })).toBe(LOAD_OUTCOME.LOADED_PARTIAL);
+  });
+
+  it('cloud unreachable with NO local data is still INDETERMINATE', () => {
+    // Nothing to fall back to - we cannot tell "no data" from "unreadable".
+    expect(classifyLoadOutcome({ projectCount: 0, readFailures: [failure('firestore:userMeta')] }))
+      .toBe(LOAD_OUTCOME.INDETERMINATE);
+  });
+
+  it('local-only permits local saving but NOT cloud uploads', () => {
+    const o = LOAD_OUTCOME.LOADED_LOCAL_ONLY;
+    expect(mayPersist(o)).toBe(true);        // edits are kept on this device
+    expect(mayUploadToCloud(o)).toBe(false); // but never pushed blind
+    expect(shouldBlockEditing(o)).toBe(false);
+    expect(mayCreateDefaultProject(o)).toBe(false);
+  });
+
+  it('tells the user their work is local and to sync before switching device', () => {
+    const msg = describeLoadOutcome(LOAD_OUTCOME.LOADED_LOCAL_ONLY, [failure('firestore:userMeta')]);
+    expect(msg.tone).toBe('offline');
+    expect(msg.title).toContain('Working offline');
+    expect(msg.detail).toContain('NOT reached the cloud');
+    expect(msg.action).toContain('backup');
+    expect(msg.action).toContain('another device');
+  });
+});
+
+describe('mayUploadToCloud', () => {
+  it('allows uploads only after a healthy load', () => {
+    expect(mayUploadToCloud(LOAD_OUTCOME.LOADED_COMPLETE)).toBe(true);
+    expect(mayUploadToCloud(LOAD_OUTCOME.EMPTY_CONFIRMED)).toBe(true);
+  });
+
+  it('refuses uploads in every degraded state', () => {
+    expect(mayUploadToCloud(LOAD_OUTCOME.LOADED_LOCAL_ONLY)).toBe(false);
+    expect(mayUploadToCloud(LOAD_OUTCOME.LOADED_PARTIAL)).toBe(false);
+    expect(mayUploadToCloud(LOAD_OUTCOME.INDETERMINATE)).toBe(false);
+    expect(mayUploadToCloud(undefined)).toBe(false);
+  });
+
+  it('is never more permissive than mayPersist', () => {
+    for (const o of Object.values(LOAD_OUTCOME)) {
+      if (mayUploadToCloud(o)) expect(mayPersist(o)).toBe(true);
+    }
   });
 });
 

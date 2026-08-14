@@ -253,6 +253,68 @@ differential: after a partial load, `cm-sync-state` and `cm-tasks-*` are never
 created, while a healthy load creates both — proving autosave genuinely did not
 run rather than the test being blind. 113 unit tests pass (71 existing + 42 new).
 
+### Round-2 corrections after owner sign-off
+
+Owner's round-1 results: B and D groups all PASS; A1 and C1-C4 unrunnable; C2
+FAIL. Every one of those was a defect in **my test document**, caused by writing
+it against a sandbox with Firebase disabled. Lessons worth keeping:
+
+- **A cloud-connected app takes a different path than a cloud-less one.** The
+  localStorage pointer (`cm-meta`) is only read at App.jsx:1293, inside the `else`
+  at 1291 — i.e. only after a cloud read has already failed. Corrupting it while
+  the cloud is healthy changes nothing. A1 was invalid for the same reason: an
+  incognito window has empty local storage but a full cloud, so the app downloads
+  real projects instead of experiencing a first run.
+- **"Turn off Wi-Fi" cannot test a web-hosted app.** The browser cannot fetch the
+  app itself; you get Chrome's offline page and never reach the code. My sandbox
+  served from localhost, which hid this.
+- **Cloud reads take 20-30s to fail, not instantly.** Early re-checks used 9s
+  waits and wrongly looked like nothing happened. Anything measuring a cloud
+  failure needs a 40s wait.
+- Therefore: `cm-debug-simulate-cloud-failure` (fault-injection switch) was added
+  so the owner can test this at all. Off unless set; reads only; fails in the safe
+  direction; announces itself. Also needed for Fix 5. Remove after Fix 6.
+
+### Option A: LOADED_LOCAL_ONLY (owner's decision)
+
+The first version of this fix treated a failed cloud bootstrap read the same as a
+failed cloud *content* read, so **a plain offline reload switched the whole app to
+read-only** — a regression against the pre-existing 'local-only' mode. Owner chose
+Option A ("allow offline editing, with a warning"). Implemented as a fifth outcome:
+
+`CLOUD_BOOTSTRAP_SOURCES` (`firestore:userMeta`, `firestore:allProjects`,
+`firestore:loadSequence`) mean the Firestore phase was abandoned before adopting
+any cloud content, so the fallback local copy is whole. When those are the ONLY
+blocking failures and data loaded → `LOADED_LOCAL_ONLY`:
+
+- `mayPersist` → true (local saves allowed)
+- new `mayUploadToCloud` → **false** (never upload blind; this session never read
+  the cloud). Edits stay dirty and upload after the next healthy load.
+- amber banner + Sync now explains how to get the data uploaded.
+
+Read-only (`LOADED_PARTIAL`) is retained for: cloud unreachable **and** local copy
+damaged, or a cloud content read failing part-way.
+
+**This split required a second gate.** `writesAllowed()` (local) vs
+`cloudUploadAllowed()` (cloud). Three paths were using the local gate where they
+needed the upload gate, and the first version of Option A therefore attempted an
+upload while offline, failed, and queued a retry — caught by a browser check that
+asserted *no upload attempt at all*, not by unit tests:
+
+- the password effect (both the effect and the project-panel handler),
+- the retry-queue drain,
+- the canvas-switch flush.
+
+`maybeSnapshot` (a cloud write) was also gated explicitly; its internal
+"only after a real sync" guard already blocked it, but that was a coincidence.
+
+**Verified in-browser:** offline + complete local copy → amber banner, editing
+works, local save happens, no upload attempted; offline + damaged local copy →
+red read-only; offline + no usable pointer → blocking screen; and a
+content-level before/after comparison of every stored record proving a blocked
+load writes **nothing** (that comparison replaced a broken C2 check which
+compared key *names* with mismatched filters). 127 unit tests pass.
+
 **Deliberately left undone** (recorded in MANUAL-TEST-PR6.md §7):
 
 - Two writes still precede the verdict: the per-workspace adoption cache write and
