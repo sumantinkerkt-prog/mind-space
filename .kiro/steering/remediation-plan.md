@@ -28,7 +28,7 @@ Only these six are in scope. Everything else is explicitly deferred.
 | 3 | 19 (+ shape guard from 58) | Project-wide duplicate-id and dangling-clone check, non-throwing, **visible in production** (not DEV-gated) | **Done** — PR #3, branch `fix/bug-19-58-project-wide-id-detector` |
 | 4 | 42 | Distinguish "no data" from "couldn't read"; never write or upload defaults after an indeterminate read | **Done** — PR #6, merged. Owner-verified over 3 rounds |
 | 5 | 30 + minimal 43 | `guardedFirestoreSave` must return a real promise; route queued failures to the retry queue; `confirmSynced` clears dirty only if the ack still covers current local content | **Done** — PR #7, merged (`b155ec3`). Owner-tested: 13 of 14 PASS, C3 FAIL |
-| 5b | found by Fix 5's C3 result | The failed-write queue: no frozen payloads, one entry per document, drained during a session, and a failed write must mark its document dirty | **Built** — branch `fix/bug-30-43b-retry-queue`, awaiting owner sign-off |
+| 5b | found by Fix 5's C3 result | The failed-write queue: no frozen payloads, one entry per document, drained during a session, and a failed write must mark its document dirty | **Built** — PR #8, branch `fix/bug-30-43b-retry-queue`, awaiting owner sign-off |
 | 6 | 47 (four leaks only) | Block writes in reference sessions: reminder scheduler metadata, retry-queue execution, canvas-switch local save/flush, `PinPanel` raw setters | Not started |
 
 Then stop and let the owner use the app for 2-3 weeks before anything else.
@@ -134,8 +134,12 @@ owner's test against their real Firestore.
 
 ## Do NOT do
 
-- **Do not merge PR #8** (cross-tab copy, multi-tab awareness, reminder
-  separation). It white-screens. Not needed under one-tab discipline.
+- **Do not merge the cross-tab branch** (cross-tab copy, multi-tab awareness,
+  reminder separation). It white-screens. Not needed under one-tab discipline.
+  Earlier notes called this "PR #8"; **that number is now Fix 5b** (opened Aug
+  2026, see the table above). No open PR with that content exists on GitHub today
+  — `gh api "repos/{owner}/{repo}/pulls?state=all"` lists only #1-#8 — so identify
+  it by branch content, never by the number 8.
 - **Do not start the UUID migration** (rest of Bug 16) or the import/restore
   rework (Bug 48). Largest changes, no safety net.
 - **Do not add `takeSnapshot()` inside `updateNode`.** Bug 25 is retired; text
