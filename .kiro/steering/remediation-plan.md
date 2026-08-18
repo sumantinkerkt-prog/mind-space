@@ -606,3 +606,48 @@ Add to the list further up:
 8. **Give the owner document NAMES, not internal types.** LINE B printed
    `workspace, project, project, ...`; the owner reasonably asked which workspace.
    LINE C now prints the project and canvas names.
+
+
+### Owner sign-off (Fix 5b, PR #8): 12 of 12 PASS
+
+Test 0 confirmed the Fix 5b build via the entry shape. Groups A-D all PASS,
+including the two that mattered most:
+
+- **B2** — the count stopped growing. Two runs: 6 documents stayed 6, and 3 stayed
+  3, across a minute of continuous failure. The pre-Fix-5b queue reached 17 for
+  the same amount of work.
+- **C3** — a card written during an upload outage and a card written after it both
+  survived **two** reloads, which is the check that the frozen copy is gone.
+- **D1** — a failed project-settings upload now shows up in the unsaved list. That
+  path was completely silent before.
+
+Two behaviours the results revealed. **Neither is a fault, and neither blocked the
+sign-off**, but do not "fix" them without reading this:
+
+1. **During an outage, every canvas in the project ends up marked unsaved and
+   queued** (the owner saw 4 canvases + settings + task list). This is a direct
+   consequence of the Fix 5b change to `manualServerSync`: it no longer abandons
+   the remaining documents when one write fails, so it now attempts every
+   workspace whose `lastModified` is newer than `_lastSyncedTimestamps` — and that
+   in-memory map is empty after a page load, so nothing is skipped. Each failed
+   attempt then marks that canvas unsaved, honestly: this session never had a
+   confirmed cloud write for it. The cost is that after an outage the app
+   re-uploads canvases the user never edited (extra revision bumps, and real
+   bandwidth for image-heavy canvases, since images are inline base64).
+   **Available follow-up, NOT done:** skip non-dirty workspaces in
+   `manualServerSync` the way the debounced workspace autosave already does
+   (`if (!isDirty(wsPath(pid, wsId))) continue`). Deliberately not bundled into
+   Fix 5b - it narrows the contract of the one path that exists to force
+   everything up, and it would have needed another round of the owner's time.
+2. **`triesSoFar` cycles instead of climbing.** The owner saw 3, then 2 on the
+   next reading. Expected: at 5 attempts an entry is dropped
+   (`attempts-exhausted`), the next failed write re-queues the same document at 0,
+   and it climbs again. The document stays marked unsaved throughout, so nothing
+   is lost or forgotten - "give up" only ends the current sequence of retries, it
+   never abandons the data. Worth knowing before reading a counter as a total.
+
+Still unanswered, and now testable: whether the owner's project-settings uploads
+fail for a real reason when no debug switch is set. With Fix 5b such a failure
+appears in the chip and in the unsaved list, so a normal session will show it. If
+it happens, get the text after `[PersistenceService] Error saving project to
+Firestore:` from the Console.
