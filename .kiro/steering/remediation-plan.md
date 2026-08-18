@@ -27,10 +27,75 @@ Only these six are in scope. Everything else is explicitly deferred.
 | 2 | 16 (counter subset only) | Unify the `nextId` default, derive the counter from the highest live card id before every allocation, fix `addNode`'s same-batch closure read | **Done** — PR #2, merged (`56c3aef`) |
 | 3 | 19 (+ shape guard from 58) | Project-wide duplicate-id and dangling-clone check, non-throwing, **visible in production** (not DEV-gated) | **Done** — PR #3, branch `fix/bug-19-58-project-wide-id-detector` |
 | 4 | 42 | Distinguish "no data" from "couldn't read"; never write or upload defaults after an indeterminate read | **Done** — PR #6, merged. Owner-verified over 3 rounds |
-| 5 | 30 + minimal 43 | `guardedFirestoreSave` must return a real promise; route queued failures to `enqueueFailedWrite`; `confirmSynced` clears dirty only if the confirmed content hash still matches current local content | Not started |
+| 5 | 30 + minimal 43 | `guardedFirestoreSave` must return a real promise; route queued failures to `enqueueFailedWrite`; `confirmSynced` clears dirty only if the ack still covers current local content | **Built** — PR #7, awaiting owner sign-off |
 | 6 | 47 (four leaks only) | Block writes in reference sessions: reminder scheduler metadata, retry-queue execution, canvas-switch local save/flush, `PinPanel` raw setters | Not started |
 
 Then stop and let the owner use the app for 2-3 weeks before anything else.
+
+## Fix 5 (PR #7): honest saving — Bug 30 + minimal 43
+
+Three changes, plus write-side fault injection so any of it can be tested.
+
+**1. `guardedFirestoreSave` no longer lies (Bug 30).** It used to return `true`
+the instant it decided to *queue* a write, before that write ran — so the caller
+set the status to "synced" for something that had not happened. If the queued
+write then failed, the result was swallowed by a fire-and-forget `.catch()`.
+Replaced by `createWriteCoalescer()` in `src/saveAck.js`: the returned promise
+resolves with the REAL result of the run that supersedes yours. Superseding is
+still correct (whole-document writes, so an older pending write is redundant), but
+every waiter now learns the truth. Unexpected throws are converted to `false` and
+routed to `enqueueFailedWrite` via a new optional `retryEntry` argument.
+
+**2. `confirmSynced` no longer clears dirty for edits it does not cover (Bug 43).**
+`markDirty` now advances a monotonic `dirtySeq`. Each save captures that counter
+**at the moment it reads the data** — deliberately outside the guarded callback,
+because a coalesced callback runs later, by which time an edit may have bumped the
+counter and we would wrongly conclude the ack covered it. `confirmSynced` clears
+dirty only when the counter still matches; `baseRev` always advances (this device
+did write that revision, and the next upload must build on it or the transactional
+writer would conflict against our own write).
+
+**WHY A COUNTER AND NOT A CONTENT HASH — do not "simplify" this back.** The fix
+order text says "clears dirty only if the confirmed content hash still matches
+current local content". That cannot work, and it fails in the worst direction.
+`markDirty` and the upload payload record **different shapes** for the project
+metadata document:
+
+```
+markDirty(metaPath, { nextId, reminders, pinGroups })      // App.jsx:2597
+upload payload      = { ...allProjectMetadata, schemaVersion } // persistenceService
+```
+
+Those can never hash equal, so a hash comparison would find project metadata
+permanently modified: dirty would never clear, the document would upload forever,
+and the trust chip would permanently claim unsaved changes. A counter is shape
+independent. Accepted trade-off: an undo back to identical content still costs one
+redundant upload — the safe direction.
+
+**3. The trust chip needed no change.** It derives `unsaved` from `hasDirtyDocs`
+(App.jsx:7847) and that branch is evaluated **before** the green "Saved" branch,
+so an accurate dirty flag makes the chip honest automatically. This is also why
+the remaining "a conflict returns success" imprecision produces no visible lie —
+the document stays dirty, so the chip still says Unsaved changes.
+
+**Write-side fault injection added**, without which none of this is testable:
+`cm-debug-slow-cloud-write` (delay in ms) and `cm-debug-fail-cloud-write`. The
+slow one exists because Bug 43 only occurs between a write starting and finishing,
+a window of ~200ms in real use. Applied inside `transactionalWrite` so all three
+savers are covered, and so a simulated failure travels the genuine error path.
+Both fail safe. **All three debug switches must be removed after Fix 6.**
+
+**Verified in-browser (fake Firebase project, 8 checks):** the counter increments;
+an ack for old data keeps dirty while advancing baseRev; a quiet document still
+goes clean; legacy sync-state without a counter still clears (upgrade safety); a
+failed write returns false AND lands in the retry queue; a coalesced write does
+not settle before it runs and reports the real result; a failed write leaves
+`hasDirtyDocs` true; the slow-write switch really delays. Plus 27 new unit tests
+(154 total).
+
+**Not verified by me:** the successful-ack path against a real cloud. A fake
+project cannot produce a successful write, so Group B of MANUAL-TEST-PR7.md is the
+owner's test against their real Firestore.
 
 ## Carried forward after Fix 4 (do not lose these)
 

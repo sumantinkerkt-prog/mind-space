@@ -10,6 +10,7 @@
 import { collection, doc, setDoc, getDoc, getDocs, deleteDoc, updateDoc, increment, serverTimestamp, arrayUnion, arrayRemove, runTransaction } from 'firebase/firestore';
 import { db, isFirebaseConfigured } from './firebase';
 import { severityForSource, READ_SEVERITY } from './loadOutcome';
+import { nextDirtySeq, shouldClearDirty, createWriteCoalescer } from './saveAck';
 
 // =============================================================================
 // READ-FAILURE REGISTRY (Bug 42)
@@ -146,6 +147,43 @@ function simulatedCloudReadFailure(what) {
     }
   } catch { /* localStorage unavailable: behave normally */ }
   return null;
+}
+
+/** Make cloud WRITES slow, so an edit can be made while one is in flight. */
+export const DEBUG_SLOW_CLOUD_WRITE_KEY = 'cm-debug-slow-cloud-write';
+/** Make cloud WRITES fail, to check failures are reported and queued. */
+export const DEBUG_FAIL_CLOUD_WRITE_KEY = 'cm-debug-fail-cloud-write';
+
+/**
+ * Apply the write-side debug switches (Fix 5 needs both to be testable).
+ *
+ * `cm-debug-slow-cloud-write` holds a delay in milliseconds. It exists because
+ * Bug 43 only happens in the window between a write starting and finishing: to
+ * see it you must edit again DURING an upload, which is impossible by hand when
+ * uploads take 200ms. Setting it to 10000 makes that window easy to hit.
+ *
+ * `cm-debug-fail-cloud-write` makes writes fail, to confirm a failure is
+ * reported honestly and lands in the retry queue.
+ *
+ * Both are off unless set, and both fail in the safe direction: a slow write is
+ * still a real write, and a failed write leaves the document marked unsaved and
+ * queued for retry - never lost.
+ */
+async function applySimulatedWriteFaults(what) {
+  let delayMs = 0;
+  let shouldFail = false;
+  try {
+    delayMs = parseInt(localStorage.getItem(DEBUG_SLOW_CLOUD_WRITE_KEY) || '0', 10) || 0;
+    shouldFail = localStorage.getItem(DEBUG_FAIL_CLOUD_WRITE_KEY) === '1';
+  } catch { return; } // localStorage unavailable: behave normally
+  if (delayMs > 0) {
+    console.warn('[Debug] Delaying the cloud write of "%s" by %dms (%s is set).', what, delayMs, DEBUG_SLOW_CLOUD_WRITE_KEY);
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+  if (shouldFail) {
+    console.warn('[Debug] Failing the cloud write of "%s" on purpose (%s is set).', what, DEBUG_FAIL_CLOUD_WRITE_KEY);
+    throw new Error(`Simulated cloud write failure (${what}) - ${DEBUG_FAIL_CLOUD_WRITE_KEY} is set`);
+  }
 }
 
 /**
@@ -341,12 +379,33 @@ export function seedSyncState(path, serverRev, content) {
   saveSyncStateMap(map);
 }
 
-/** Mark a document dirty (local edit made) and record its current fingerprint. */
+/**
+ * Mark a document dirty (local edit made) and record its current fingerprint.
+ *
+ * Bug 43: also advances `dirtySeq`, a monotonic counter. An upload captures this
+ * counter at the moment it reads the data; confirmSynced then refuses to clear
+ * the dirty flag if the counter has moved on, because that means the user edited
+ * again while the upload was in flight and the acknowledgement does not cover
+ * those newer edits. See src/saveAck.js for why a counter and not a hash.
+ */
 export function markDirty(path, content) {
   const map = loadSyncStateMap();
   const prev = map[path] || { baseRev: null, dirty: false, syncedHash: null };
-  map[path] = { ...prev, dirty: true, currentHash: content ? computeContentHash(content) : prev.currentHash };
+  map[path] = {
+    ...prev,
+    dirty: true,
+    currentHash: content ? computeContentHash(content) : prev.currentHash,
+    dirtySeq: nextDirtySeq(prev.dirtySeq),
+  };
   saveSyncStateMap(map);
+}
+
+/**
+ * The document's current dirty counter, captured by an uploader at the same
+ * moment it reads the data it is about to send.
+ */
+export function getDirtySeq(path) {
+  return getSyncState(path).dirtySeq;
 }
 
 /** Timestamp (ms) of the most recent confirmed successful cloud write. */
@@ -355,18 +414,47 @@ let _lastCloudSyncAt = 0;
 /** Get the timestamp of the last confirmed successful cloud write (0 if none). */
 export function getLastCloudSyncAt() { return _lastCloudSyncAt; }
 
-/** After a confirmed successful upload: advance baseRev, clear dirty, record synced hash. */
-export function confirmSynced(path, newServerRev, content) {
+/**
+ * After a confirmed successful upload: advance baseRev, and clear dirty ONLY if
+ * the acknowledgement still covers what is on this device (Bug 43).
+ *
+ * `baseRev` always advances - this device really did write that revision, and
+ * the next upload must build on it or the transactional writer would see the
+ * cloud ahead of us and raise a conflict against our own write.
+ *
+ * `dirty` is conditional. If the user edited again while this upload was in
+ * flight, `dirtySeq` has moved past the value captured when the uploaded data
+ * was read, so the newer edits are NOT on the server and the document stays
+ * dirty. Clearing it there was the bug: it marked unsent edits as safe, and the
+ * trust chip (which derives "unsaved" from hasDirtyDocs) would show all-clear.
+ *
+ * @param {string} path
+ * @param {number} newServerRev
+ * @param {object} content    the payload that was actually written
+ * @param {number} [confirmedSeq] dirtySeq captured when that payload was read
+ */
+export function confirmSynced(path, newServerRev, content, confirmedSeq) {
   const map = loadSyncStateMap();
   const prev = map[path] || {};
+  const clearDirty = shouldClearDirty({ confirmedSeq, currentSeq: prev.dirtySeq });
   map[path] = {
     baseRev: typeof newServerRev === 'number' ? newServerRev : (prev.baseRev || 0),
-    dirty: false,
-    syncedHash: content ? computeContentHash(content) : prev.syncedHash
+    dirty: !clearDirty,
+    syncedHash: content ? computeContentHash(content) : prev.syncedHash,
+    // Keep the counter and the local fingerprint when edits are still pending,
+    // so the next upload can be judged the same way.
+    ...(clearDirty ? {} : { dirtySeq: prev.dirtySeq, currentHash: prev.currentHash }),
   };
   saveSyncStateMap(map);
   _lastCloudSyncAt = Date.now();
   _syncedSinceSnapshot = true;
+  if (!clearDirty) {
+    console.info(
+      '[Sync] Upload of %s confirmed, but newer local edits exist (seq %s -> %s). ' +
+      'Keeping it marked unsaved so those edits are uploaded too.',
+      path, confirmedSeq, prev.dirtySeq
+    );
+  }
 }
 
 /**
@@ -781,7 +869,10 @@ export async function hydrateProject(projectId) {
 // Write-race guard for Firestore writes - per-path queuing to avoid dropping
 // concurrent saves to different documents. Each document path gets its own
 // in-flight/queued slot, so a workspace save cannot discard a metadata save.
-const firestoreWriteQueues = new Map(); // Map<string, { inFlight: boolean, queued: Function|null }>
+// Serialises writes per document and resolves callers with the real outcome.
+// Replaces a hand-rolled queue that reported success for writes it had merely
+// queued. See src/saveAck.js for the reasoning and its unit tests.
+const firestoreWriteCoalescer = createWriteCoalescer();
 
 // =============================================================================
 // RETRY QUEUE - Persist failed Firestore writes for later retry
@@ -907,29 +998,28 @@ export async function processRetryQueue() {
     setTimeout(() => processRetryQueue(), nextDelay);
   }
 }
-async function guardedFirestoreSave(path, saveFn) {
-  if (!firestoreWriteQueues.has(path)) {
-    firestoreWriteQueues.set(path, { inFlight: false, queued: null });
-  }
-  const slot = firestoreWriteQueues.get(path);
-
-  if (slot.inFlight) {
-    slot.queued = saveFn;
-    return true;
-  }
-
-  slot.inFlight = true;
-  try {
-    const result = await saveFn();
-    return result;
-  } finally {
-    slot.inFlight = false;
-    if (slot.queued) {
-      const nextSave = slot.queued;
-      slot.queued = null;
-      guardedFirestoreSave(path, nextSave).catch(() => {});
-    }
-  }
+/**
+ * Serialise writes per document and report the REAL outcome (Bug 30).
+ *
+ * Previously this returned `true` the instant it decided to queue a write,
+ * before that write had run - so the caller set the status to "synced" for
+ * something that had not happened yet, and if it later failed, the result was
+ * swallowed by a fire-and-forget `.catch()`. Now the returned promise resolves
+ * with the actual result of the run that supersedes yours.
+ *
+ * @param {string} key       Firestore document path, used purely as a mutex key.
+ * @param {Function} saveFn  Performs the write; resolves true/false.
+ * @param {object} [retryEntry] Descriptor for the retry queue, used only if
+ *        saveFn throws unexpectedly (its own catch handles expected failures).
+ */
+async function guardedFirestoreSave(key, saveFn, retryEntry) {
+  return firestoreWriteCoalescer.run(key, saveFn, (err) => {
+    // saveFn is written to catch its own errors and enqueue them, so reaching
+    // here means something escaped it. Route it to the retry queue anyway
+    // rather than losing the write silently.
+    console.warn('[PersistenceService] Unexpected error escaped a Firestore save:', (err && err.message) || err);
+    if (retryEntry) enqueueFailedWrite(retryEntry);
+  });
 }
 
 /**
@@ -943,6 +1033,10 @@ async function guardedFirestoreSave(path, saveFn) {
  * @returns {Promise<{ status: 'ok'|'conflict', serverRev: number, serverData?: object }>}
  */
 async function transactionalWrite({ docRef, path, payload, mergeMode }) {
+  // Debug switches, no-ops unless explicitly set. Placed before the transaction
+  // so a simulated delay widens the real in-flight window and a simulated
+  // failure travels the caller's genuine error path.
+  await applySimulatedWriteFaults(path);
   const state = getSyncState(path);
   const expectedBaseRev = state.baseRev;
   const localDirty = state.dirty;
@@ -982,6 +1076,11 @@ async function transactionalWrite({ docRef, path, payload, mergeMode }) {
 export async function saveProjectToFirestore(projectId, metadata) {
   if (!isFirebaseConfigured() || !db) return false;
   const path = metaPath(projectId);
+  // Bug 43: capture the dirty counter NOW, paired with `metadata` as the caller
+  // read it. Capturing inside the callback would be wrong: a coalesced write
+  // runs later, by which time an edit may have bumped the counter, and we would
+  // wrongly conclude the acknowledgement covered it.
+  const confirmedSeq = getDirtySeq(path);
   return guardedFirestoreSave(`projects/${projectId}`, async () => {
     try {
       // Strip password (local-only) AND workspaceIds (delta-managed only)
@@ -993,14 +1092,14 @@ export async function saveProjectToFirestore(projectId, metadata) {
         emitConflict({ path, kind: 'meta', projectId, serverRev: res.serverRev, serverData: res.serverData, localData: payload });
         return true; // handled via conflict flow, not an error
       }
-      confirmSynced(path, res.serverRev, payload);
+      confirmSynced(path, res.serverRev, payload, confirmedSeq);
       return true;
     } catch (error) {
       console.warn('[PersistenceService] Error saving project to Firestore:', error.message);
       enqueueFailedWrite({ type: 'project', projectId, data: metadata });
       return false;
     }
-  });
+  }, { type: 'project', projectId, data: metadata });
 }
 
 /**
@@ -1104,6 +1203,7 @@ export async function loadProjectFromFirestore(projectId) {
 export async function saveWorkspaceToFirestore(projectId, workspaceId, data) {
   if (!isFirebaseConfigured() || !db) return false;
   const path = wsPath(projectId, workspaceId);
+  const confirmedSeq = getDirtySeq(path); // Bug 43: paired with `data` as read
   return guardedFirestoreSave(`projects/${projectId}/workspaces/${workspaceId}`, async () => {
     try {
       const docRef = doc(db, 'projects', projectId, 'workspaces', workspaceId);
@@ -1123,7 +1223,7 @@ export async function saveWorkspaceToFirestore(projectId, workspaceId, data) {
         emitConflict({ path, kind: 'workspace', projectId, workspaceId, serverRev: res.serverRev, serverData: res.serverData, localData: payload });
         return true; // handled via conflict flow
       }
-      confirmSynced(path, res.serverRev, payload);
+      confirmSynced(path, res.serverRev, payload, confirmedSeq);
       _lastSyncedTimestamps.set(`${projectId}/${workspaceId}`, data.lastModified || Date.now());
       return true;
     } catch (error) {
@@ -1131,7 +1231,7 @@ export async function saveWorkspaceToFirestore(projectId, workspaceId, data) {
       enqueueFailedWrite({ type: 'workspace', projectId, workspaceId, data });
       return false;
     }
-  });
+  }, { type: 'workspace', projectId, workspaceId, data });
 }
 
 /**
@@ -1338,6 +1438,7 @@ export async function reconcileWorkspaceIds(projectId) {
 export async function saveTasksToFirestore(projectId, data) {
   if (!isFirebaseConfigured() || !db) return false;
   const path = tasksPath(projectId);
+  const confirmedSeq = getDirtySeq(path); // Bug 43: paired with `data` as read
   return guardedFirestoreSave(`projects/${projectId}/tasks/taskData`, async () => {
     try {
       const docRef = doc(db, 'projects', projectId, 'tasks', 'taskData');
@@ -1347,14 +1448,14 @@ export async function saveTasksToFirestore(projectId, data) {
         emitConflict({ path, kind: 'tasks', projectId, serverRev: res.serverRev, serverData: res.serverData, localData: payload });
         return true; // handled via conflict flow
       }
-      confirmSynced(path, res.serverRev, payload);
+      confirmSynced(path, res.serverRev, payload, confirmedSeq);
       return true;
     } catch (error) {
       console.warn('[PersistenceService] Error saving tasks to Firestore:', error.message);
       enqueueFailedWrite({ type: 'tasks', projectId, data });
       return false;
     }
-  });
+  }, { type: 'tasks', projectId, data });
 }
 
 /**
