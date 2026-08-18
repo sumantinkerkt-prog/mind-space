@@ -27,7 +27,8 @@ Only these six are in scope. Everything else is explicitly deferred.
 | 2 | 16 (counter subset only) | Unify the `nextId` default, derive the counter from the highest live card id before every allocation, fix `addNode`'s same-batch closure read | **Done** — PR #2, merged (`56c3aef`) |
 | 3 | 19 (+ shape guard from 58) | Project-wide duplicate-id and dangling-clone check, non-throwing, **visible in production** (not DEV-gated) | **Done** — PR #3, branch `fix/bug-19-58-project-wide-id-detector` |
 | 4 | 42 | Distinguish "no data" from "couldn't read"; never write or upload defaults after an indeterminate read | **Done** — PR #6, merged. Owner-verified over 3 rounds |
-| 5 | 30 + minimal 43 | `guardedFirestoreSave` must return a real promise; route queued failures to `enqueueFailedWrite`; `confirmSynced` clears dirty only if the ack still covers current local content | **Built** — PR #7, awaiting owner sign-off |
+| 5 | 30 + minimal 43 | `guardedFirestoreSave` must return a real promise; route queued failures to the retry queue; `confirmSynced` clears dirty only if the ack still covers current local content | **Done** — PR #7, merged (`b155ec3`). Owner-tested: 13 of 14 PASS, C3 FAIL |
+| 5b | found by Fix 5's C3 result | The failed-write queue: no frozen payloads, one entry per document, drained during a session, and a failed write must mark its document dirty | **Built** — PR #8, branch `fix/bug-30-43b-retry-queue`, awaiting owner sign-off |
 | 6 | 47 (four leaks only) | Block writes in reference sessions: reminder scheduler metadata, retry-queue execution, canvas-switch local save/flush, `PinPanel` raw setters | Not started |
 
 Then stop and let the owner use the app for 2-3 weeks before anything else.
@@ -133,14 +134,34 @@ owner's test against their real Firestore.
 
 ## Do NOT do
 
-- **Do not merge PR #8** (cross-tab copy, multi-tab awareness, reminder
-  separation). It white-screens. Not needed under one-tab discipline.
+- **Do not merge the cross-tab branch** (cross-tab copy, multi-tab awareness,
+  reminder separation). It white-screens. Not needed under one-tab discipline.
+  Earlier notes called this "PR #8"; **that number is now Fix 5b** (opened Aug
+  2026, see the table above). No open PR with that content exists on GitHub today
+  — `gh api "repos/{owner}/{repo}/pulls?state=all"` lists only #1-#8 — so identify
+  it by branch content, never by the number 8.
 - **Do not start the UUID migration** (rest of Bug 16) or the import/restore
   rework (Bug 48). Largest changes, no safety net.
 - **Do not add `takeSnapshot()` inside `updateNode`.** Bug 25 is retired; text
   undo already works via one snapshot per edit session. See Doc 05 corrections.
 - **Do not "fix" Bug 15 by adding `workspaceIds` to the metadata fingerprint.**
   The metadata writer strips it on purpose.
+
+## How the owner tests branch code (answered, Aug 2026)
+
+**Vercel builds a preview deployment for every pull request.** On the PR page,
+bottom of the conversation, the `vercel` bot comment → *Preview* link, e.g.
+`https://mind-space-git-fix-bug-30-43-honest-saving-mind17.vercel.app/#/editor/<projectId>/<workspaceId>`.
+
+Consequences for every future manual test document:
+
+- The owner can test a branch **before** it is merged; a "Test 0" build check is
+  still worth including, because a preview can be stale or the wrong link.
+- **The preview talks to the owner's REAL Firebase project.** Tests must never
+  delete or restructure data, and the test doc must say what it touches.
+- Because it is served over the internet, "turn off Wi-Fi" remains untestable,
+  and fault-injection switches remain the only way to test failure paths.
+- Say which branch the doc belongs to, so the owner can find the right preview.
 
 ## Environment quirks
 
@@ -445,3 +466,188 @@ The owner is not a developer and cannot read code. Explain in plain language,
 name files rather than describing IDE actions, and surface command output and
 diffs in chat — they cannot see the terminal. Never claim something is verified
 when only the build passed.
+
+
+## MERGED (PR #7): Fix 5, honest saving (Bugs 30 + 43)
+
+Owner-tested on the Vercel preview: **13 of 14 PASS, C3 FAIL.** Merged as
+`b155ec3` because C3's failure was not caused by it — see Fix 5b below.
+
+The result that mattered: **B2/B3 passed with `cloudVersion` V6 → V12**, i.e. two
+separate uploads happened and the card typed during the first upload survived a
+reload. That is the Bug 30/43 data-loss path, closed and confirmed in the owner's
+own browser.
+
+Two owner observations worth keeping:
+
+- A2: the chip goes `Unsaved → Syncing → Unsaved → Saved`. That is correct, not a
+  glitch: two documents (canvas + project settings) each complete their own
+  upload, and the intermediate "Unsaved" is the second one still genuinely
+  pending. The old code showed green there.
+- D2: after recovery, a canvas sat on **Syncing… for over two minutes** and only
+  went green after the owner added another card. Cause found in Fix 5b:
+  `manualServerSync` uploaded project metadata FIRST and `return false`d on
+  failure, so no canvas was uploaded at all; the new card went up via the
+  separate per-canvas debounced path.
+
+## Fix 5b: the failed-write queue (branch `fix/bug-30-43b-retry-queue`)
+
+C3 asked for `writes waiting to retry: 0` after uploads recovered. That number
+could not be reached, and chasing why exposed three defects plus two behind them.
+**`processRetryQueue` was byte-identical to `main` before this branch** (verified),
+so none of this was introduced by Fix 5 — Fix 5 merely stopped the app lying
+about failures, which made the queue visible for the first time.
+
+**Owner's evidence, after re-running C1–C3 without C4's reload:** LINE C showed
+**9 entries for 5 documents, all one minute old, `triesSoFar: 0`**, while LINE D
+said **`nothing unsaved anywhere`**. Nine pending uploads, nothing marked unsaved:
+the queue and the dirty map disagreed completely.
+
+### What was wrong
+
+1. **Frozen payloads.** Each entry stored `data` as it was when the write failed,
+   and the queue drained on the next page load. If that document had since been
+   saved successfully it was no longer dirty — and `transactionalWrite`'s
+   revision check only applies to DIRTY documents — so the frozen copy
+   overwrote newer cloud content and `confirmSynced` recorded it as the baseline.
+   A genuine data-loss route, pre-existing, and the reason the owner was told to
+   check the canvases touched during the Fix 5 run.
+2. **One entry per ATTEMPT.** 11 → 17 → 9-for-5-documents. Every write here is a
+   complete document, so all but the newest attempt were redundant.
+3. **No in-session drain.** Processed only at page load and on the `online`
+   event. The self-rescheduling `setTimeout` only ran if the queue was already
+   non-empty when a pass started, so a queue that filled up during a session was
+   never touched until reload. Hence C3.
+4. **`manualServerSync` abandoned everything after one failure** (the D2 note).
+5. **A failed project-metadata write marked nothing dirty.**
+   `saveProjectToFirestore` is called from ~10 places in App.jsx (rename, password
+   effect, project hydration loop, import, canvas-management paths); most are
+   fire-and-forget with no `markDirty`. So the failure was invisible to the chip
+   AND unrecognisable to any retry policy. This is the best explanation for the
+   six extra `project settings` entries the owner saw appear during C3.
+
+### The shape of the fix
+
+New pure module `src/retryQueue.js` (43 unit tests): `retryKey`, `backoffMs`,
+`normaliseEntry`, `normaliseQueue`, `mergeQueueEntry`, `planRetry`,
+`applyRetryOutcome`, `removeQueueEntry`.
+
+**The load-bearing rule: a retry only ever happens for a document that is still
+marked dirty.**
+
+- Not dirty ⇒ nothing of ours is missing from the cloud ⇒ drop the entry WITHOUT
+  writing. This is what removes defect 1.
+- Dirty ⇒ `transactionalWrite` performs its revision check, so a retry cannot
+  clobber a newer cloud revision; it routes to the conflict flow instead.
+
+That rule depends on `noteWriteFailed()` (new) marking the document dirty on every
+failed write — defect 5's fix is what makes defect 1's fix safe. **Do not remove
+the `markDirty` in `noteWriteFailed` without re-reading this.**
+
+Other decisions:
+
+- Entries carry **no content**. A retry re-reads the current local copy
+  (`loadProjectMeta` / `loadWorkspace` / `loadTasks`) and sends that.
+- `loadRetryQueue` normalises on every read, which **migrates and defuses
+  pre-Fix-5b entries already sitting in the owner's browser** — the frozen `data`
+  is discarded, and duplicates collapse.
+- `confirmSynced` calls `dropQueuedWriteForPath` when it clears dirty, so the
+  count falls the moment a document is genuinely saved rather than at the next
+  drain. This is what makes C3's expectation reachable.
+- Drained on the existing 20-second heartbeat in App.jsx, gated on
+  `cloudUploadAllowed()` like every other cloud write. The old self-scheduling
+  timer is gone; it only existed because nothing else drained the queue.
+- After `MAX_RETRY_COUNT` (5) the entry is dropped but the document **stays
+  dirty**: it really is unsaved, the chip should keep saying so, and the next edit
+  or heartbeat sync tries again.
+- `manualServerSync` attempts every document and returns the aggregate result.
+
+Verification: **211 unit tests** (154 before + 43 pure + 14 integration). The
+integration file `src/retryQueueIntegration.test.js` drives the REAL
+persistenceService against a fake Firestore and fake localStorage, using the app's
+own `cm-debug-fail-cloud-write` switch so failures travel the genuine path. It
+proves, among other things: a retry uploads current content and not the frozen
+copy; a clean document's entry is dropped with **zero** write attempts; 12 failed
+writes across 2 documents leave 2 entries; and a failing metadata write no longer
+stops the canvas going up. Browser check: app boots, renders, survives past the
+20-second heartbeat with a clean console (Firebase credentials neutered first,
+then restored with `git checkout src/firebase.js`).
+
+**Not verifiable by the owner** (recorded in MANUAL-TEST-FIX5B.md §7): the
+Console switch fails ALL writes, so "only the project-settings write fails" and
+"gives up after 5 attempts" are covered by automated tests only. Say so plainly
+rather than implying the owner verified them.
+
+### Still open in this area
+
+- `saveUserMeta` still has no retry entry.
+- `ensureWorkspaceIds` / `addWorkspaceIdToFirestore` / `removeWorkspaceIdFromFirestore`
+  still use plain `updateDoc`, bypassing `guardedFirestoreSave` and the retry
+  queue entirely.
+- A conflict is still reported to the caller as a successful save (`return true`),
+  and a retry of a conflicted document therefore drops its queue entry. The
+  conflict flow owns the data at that point, so nothing is lost, but it is
+  imprecise.
+- **We still do not know whether the owner's project-metadata uploads fail for a
+  real reason.** With Fix 5b such a failure is now visible (chip + LINE D), so
+  the next test round answers it. If it does fail, get the exact text after
+  `[PersistenceService] Error saving project to Firestore:` from the Console.
+
+## Extra testing lessons (Fix 5 round)
+
+Add to the list further up:
+
+6. **Take a BASELINE reading before any test that counts something.** The Fix 5
+   document asked the owner to compare a queue length without ever establishing
+   what it was before the test started, so 11 was uninterpretable.
+7. **Turn off every switch a group sets, inside that group.** Group B of the Fix 5
+   doc set `cm-debug-slow-cloud-write` to 2500ms and never cleared it, so it was
+   still set during Group C.
+8. **Give the owner document NAMES, not internal types.** LINE B printed
+   `workspace, project, project, ...`; the owner reasonably asked which workspace.
+   LINE C now prints the project and canvas names.
+
+
+### Owner sign-off (Fix 5b, PR #8): 12 of 12 PASS
+
+Test 0 confirmed the Fix 5b build via the entry shape. Groups A-D all PASS,
+including the two that mattered most:
+
+- **B2** — the count stopped growing. Two runs: 6 documents stayed 6, and 3 stayed
+  3, across a minute of continuous failure. The pre-Fix-5b queue reached 17 for
+  the same amount of work.
+- **C3** — a card written during an upload outage and a card written after it both
+  survived **two** reloads, which is the check that the frozen copy is gone.
+- **D1** — a failed project-settings upload now shows up in the unsaved list. That
+  path was completely silent before.
+
+Two behaviours the results revealed. **Neither is a fault, and neither blocked the
+sign-off**, but do not "fix" them without reading this:
+
+1. **During an outage, every canvas in the project ends up marked unsaved and
+   queued** (the owner saw 4 canvases + settings + task list). This is a direct
+   consequence of the Fix 5b change to `manualServerSync`: it no longer abandons
+   the remaining documents when one write fails, so it now attempts every
+   workspace whose `lastModified` is newer than `_lastSyncedTimestamps` — and that
+   in-memory map is empty after a page load, so nothing is skipped. Each failed
+   attempt then marks that canvas unsaved, honestly: this session never had a
+   confirmed cloud write for it. The cost is that after an outage the app
+   re-uploads canvases the user never edited (extra revision bumps, and real
+   bandwidth for image-heavy canvases, since images are inline base64).
+   **Available follow-up, NOT done:** skip non-dirty workspaces in
+   `manualServerSync` the way the debounced workspace autosave already does
+   (`if (!isDirty(wsPath(pid, wsId))) continue`). Deliberately not bundled into
+   Fix 5b - it narrows the contract of the one path that exists to force
+   everything up, and it would have needed another round of the owner's time.
+2. **`triesSoFar` cycles instead of climbing.** The owner saw 3, then 2 on the
+   next reading. Expected: at 5 attempts an entry is dropped
+   (`attempts-exhausted`), the next failed write re-queues the same document at 0,
+   and it climbs again. The document stays marked unsaved throughout, so nothing
+   is lost or forgotten - "give up" only ends the current sequence of retries, it
+   never abandons the data. Worth knowing before reading a counter as a total.
+
+Still unanswered, and now testable: whether the owner's project-settings uploads
+fail for a real reason when no debug switch is set. With Fix 5b such a failure
+appears in the chip and in the unsaved list, so a normal session will show it. If
+it happens, get the text after `[PersistenceService] Error saving project to
+Firestore:` from the Console.

@@ -11,6 +11,9 @@ import { collection, doc, setDoc, getDoc, getDocs, deleteDoc, updateDoc, increme
 import { db, isFirebaseConfigured } from './firebase';
 import { severityForSource, READ_SEVERITY } from './loadOutcome';
 import { nextDirtySeq, shouldClearDirty, createWriteCoalescer } from './saveAck';
+import {
+  retryKey, normaliseQueue, mergeQueueEntry, planRetry, applyRetryOutcome, removeQueueEntry,
+} from './retryQueue';
 
 // =============================================================================
 // READ-FAILURE REGISTRY (Bug 42)
@@ -448,6 +451,10 @@ export function confirmSynced(path, newServerRev, content, confirmedSeq) {
   saveSyncStateMap(map);
   _lastCloudSyncAt = Date.now();
   _syncedSinceSnapshot = true;
+  // Fix 5b: this document is now genuinely in the cloud, so any queued retry for
+  // it is obsolete. Clearing it here (rather than at the next drain) is what
+  // makes the "waiting to retry" count fall as soon as a recovery succeeds.
+  if (clearDirty) dropQueuedWriteForPath(path);
   if (!clearDirty) {
     console.info(
       '[Sync] Upload of %s confirmed, but newer local edits exist (seq %s -> %s). ' +
@@ -879,17 +886,20 @@ const firestoreWriteCoalescer = createWriteCoalescer();
 // =============================================================================
 
 const RETRY_QUEUE_KEY = 'cm-retry-queue';
-const MAX_RETRY_COUNT = 5;
-const MAX_BACKOFF_MS = 30000;
 
 /**
- * Load the retry queue from localStorage.
- * @returns {Array} Array of queued write entries
+ * Load the retry queue from localStorage, normalised and de-duplicated.
+ *
+ * Normalising on every read is what migrates queues written before Fix 5b: they
+ * carried a frozen copy of the document, which is discarded here. See the header
+ * of src/retryQueue.js for why that copy was dangerous.
+ *
+ * @returns {Array} normalised entries (no content payloads)
  */
 function loadRetryQueue() {
   try {
     const raw = localStorage.getItem(RETRY_QUEUE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    return normaliseQueue(raw ? JSON.parse(raw) : [], Date.now());
   } catch (e) {
     // Benign: the data itself is still on disk and still marked dirty, so the
     // next edit re-queues it. Only the pending retry attempts are lost.
@@ -912,92 +922,168 @@ function saveRetryQueue(queue) {
 }
 
 /**
- * Enqueue a failed write for later retry.
- * Skipped during retry processing to avoid duplicates.
- * @param {object} entry - { type: 'project'|'workspace'|'tasks', projectId, workspaceId?, data }
+ * Sync-state path for a queued document, so the retry can ask "is this still
+ * dirty?" - the question the whole policy turns on.
+ * @param {object} entry
+ * @returns {string}
  */
-let _isProcessingRetryQueue = false;
-
-function enqueueFailedWrite(entry) {
-  // Do not enqueue during retry processing - the retry loop handles re-queuing itself
-  if (_isProcessingRetryQueue) return;
-  const queue = loadRetryQueue();
-  queue.push({
-    id: generateId(),
-    type: entry.type,
-    projectId: entry.projectId,
-    workspaceId: entry.workspaceId || null,
-    data: entry.data,
-    timestamp: Date.now(),
-    retryCount: 0
-  });
-  saveRetryQueue(queue);
+function pathForRetryEntry(entry) {
+  if (entry.type === 'project') return metaPath(entry.projectId);
+  if (entry.type === 'tasks') return tasksPath(entry.projectId);
+  return wsPath(entry.projectId, entry.workspaceId);
 }
 
 /**
- * Process the retry queue with exponential backoff.
- * Retries each entry up to MAX_RETRY_COUNT times with delays of 1s, 2s, 4s, 8s, 16s (capped at 30s).
- * Entries exceeding the retry limit are discarded with a warning.
+ * Is the document still present on this device? A retry re-reads live local
+ * content, so a document that has been deleted locally has nothing to send.
+ * @param {object} entry
+ * @returns {boolean}
+ */
+function retryEntryHasLocalCopy(entry) {
+  if (entry.type === 'project') return !!loadProjectMeta(entry.projectId);
+  if (entry.type === 'tasks') return !!loadTasks(entry.projectId);
+  return !!loadWorkspace(entry.projectId, entry.workspaceId);
+}
+
+/**
+ * Record that a cloud write failed: mark the document dirty, then queue it.
+ *
+ * MARKING DIRTY IS THE POINT (Fix 5b). Project metadata is uploaded from about
+ * ten places, and most of them never call markDirty - they just fire the write.
+ * When one of those failed, nothing recorded it: the status chip derives
+ * "unsaved" from the dirty flags, so it stayed green while the write was lost,
+ * and the retry policy in retryQueue.js could not tell a pending document from a
+ * saved one. Marking dirty here makes both honest, and has a third effect that
+ * matters more: `transactionalWrite` only performs its "do not overwrite newer
+ * cloud data" check on DIRTY documents, so every retry is now covered by it.
+ *
+ * Passing no content leaves `currentHash` alone - this is not a new edit, it is
+ * the same content still failing to leave the device.
+ *
+ * @param {object} descriptor { type, projectId, workspaceId? }
+ */
+function noteWriteFailed(descriptor) {
+  try {
+    const path = pathForRetryEntry(descriptor);
+    if (!isDirty(path)) markDirty(path, null);
+  } catch { /* marking is best-effort; queuing below matters more */ }
+  enqueueFailedWrite(descriptor);
+}
+
+/**
+ * Queue a failed write for a later attempt. One entry per DOCUMENT: repeated
+ * failures of the same document update the existing entry instead of appending
+ * a new one. No content is stored - the retry re-reads the current local copy.
+ * @param {object} descriptor { type: 'project'|'workspace'|'tasks', projectId, workspaceId? }
+ */
+function enqueueFailedWrite(descriptor) {
+  saveRetryQueue(mergeQueueEntry(loadRetryQueue(), descriptor, Date.now()));
+}
+
+/**
+ * Forget any queued retry for a document that has just been confirmed saved by
+ * another route (the normal debounced upload, or a manual sync). Without this,
+ * the "waiting to retry" count only fell at the next drain, which is what made
+ * test C3 unpassable: the recovery had genuinely worked, but the count still
+ * showed the old failures.
+ * @param {string} path sync-state path
+ */
+function dropQueuedWriteForPath(path) {
+  try {
+    const queue = loadRetryQueue();
+    if (queue.length === 0) return;
+    const i = path.indexOf('/');
+    if (i < 0) return;
+    const projectId = path.slice(0, i);
+    const docId = path.slice(i + 1);
+    const descriptor = docId === '__meta'
+      ? { type: 'project', projectId }
+      : docId === '__tasks'
+        ? { type: 'tasks', projectId }
+        : { type: 'workspace', projectId, workspaceId: docId };
+    const next = removeQueueEntry(queue, retryKey(descriptor));
+    if (next.length !== queue.length) saveRetryQueue(next);
+  } catch { /* bookkeeping only */ }
+}
+
+/** Guard against two overlapping drains (page-load drain + heartbeat drain). */
+let _retryDrainInFlight = false;
+
+/**
+ * Attempt the queued writes that are due.
+ *
+ * Differences from the pre-Fix-5b version, all of them deliberate:
+ *  - It sends the CURRENT local copy of each document, never a frozen copy.
+ *  - It only sends documents that are still dirty; anything already saved by
+ *    another route is dropped without a write.
+ *  - It re-reads the stored queue around each attempt, so a write that fails
+ *    while this pass is awaiting Firestore is not silently discarded by the
+ *    pass writing back a stale list.
+ *
  * @returns {Promise<void>}
  */
 export async function processRetryQueue() {
   if (!isFirebaseConfigured() || !db) return;
+  if (_retryDrainInFlight) return;
 
   const queue = loadRetryQueue();
   if (queue.length === 0) return;
 
-  _isProcessingRetryQueue = true;
-  const remaining = [];
-
-  for (const entry of queue) {
-    if (entry.retryCount >= MAX_RETRY_COUNT) {
-      console.warn('[PersistenceService] Retry limit reached, discarding failed write:', entry.type, entry.projectId, entry.workspaceId || '');
-      continue;
-    }
-
-    // Calculate backoff delay: 1s * 2^retryCount, capped at MAX_BACKOFF_MS
-    const backoffMs = Math.min(1000 * Math.pow(2, entry.retryCount), MAX_BACKOFF_MS);
-    const elapsed = Date.now() - entry.timestamp;
-
-    // Only retry if enough time has passed since last attempt
-    if (elapsed < backoffMs) {
-      remaining.push(entry);
-      continue;
-    }
-
-    let success = false;
-    try {
-      if (entry.type === 'project') {
-        success = await saveProjectToFirestore(entry.projectId, entry.data);
-      } else if (entry.type === 'workspace') {
-        success = await saveWorkspaceToFirestore(entry.projectId, entry.workspaceId, entry.data);
-      } else if (entry.type === 'tasks') {
-        success = await saveTasksToFirestore(entry.projectId, entry.data);
-      }
-    } catch {
-      success = false;
-    }
-
-    if (!success) {
-      // Update retry count and timestamp for next attempt
-      remaining.push({
-        ...entry,
-        retryCount: entry.retryCount + 1,
-        timestamp: Date.now()
+  _retryDrainInFlight = true;
+  try {
+    for (const entry of queue) {
+      const path = pathForRetryEntry(entry);
+      const plan = planRetry(entry, {
+        now: Date.now(),
+        dirty: isDirty(path),
+        hasLocalCopy: retryEntryHasLocalCopy(entry),
       });
+
+      if (plan.action === 'wait') continue;
+
+      if (plan.action === 'drop') {
+        if (plan.reason === 'attempts-exhausted') {
+          // The document stays marked dirty on purpose: it really is unsaved,
+          // the chip should keep saying so, and the next edit or manual sync
+          // will try again.
+          console.warn('[PersistenceService] Giving up on retrying %s after %d attempts - it is still marked unsaved.', path, entry.retryCount);
+        } else {
+          console.info('[PersistenceService] Dropping queued retry for %s (%s).', path, plan.reason);
+        }
+        saveRetryQueue(removeQueueEntry(loadRetryQueue(), entry.key));
+        continue;
+      }
+
+      // Re-read live local content, so what goes up is what this device holds now.
+      let ok = false;
+      try {
+        if (entry.type === 'project') {
+          const meta = loadProjectMeta(entry.projectId);
+          ok = meta ? await saveProjectToFirestore(entry.projectId, { ...meta, lastModified: Date.now() }) : false;
+        } else if (entry.type === 'workspace') {
+          const data = loadWorkspace(entry.projectId, entry.workspaceId);
+          ok = data ? await saveWorkspaceToFirestore(entry.projectId, entry.workspaceId, data) : false;
+        } else if (entry.type === 'tasks') {
+          const t = loadTasks(entry.projectId);
+          ok = t ? await saveTasksToFirestore(entry.projectId, { tasks: t.tasks || [], taskGroups: t.taskGroups || [] }) : false;
+        }
+      } catch {
+        ok = false;
+      }
+
+      // A failed attempt re-queues itself through noteWriteFailed, which keeps
+      // the existing count; this is the single place that advances it.
+      saveRetryQueue(applyRetryOutcome(loadRetryQueue(), entry.key, { ok, now: Date.now() }));
     }
-    // If success, entry is dropped from queue (not re-added)
+  } finally {
+    _retryDrainInFlight = false;
   }
 
-  _isProcessingRetryQueue = false;
-  saveRetryQueue(remaining);
-
-  // If there are still items remaining, schedule another pass
-  if (remaining.length > 0) {
-    const nextDelay = Math.min(1000 * Math.pow(2, Math.min(...remaining.map(e => e.retryCount))), MAX_BACKOFF_MS);
-    setTimeout(() => processRetryQueue(), nextDelay);
-  }
+  // Anything still queued is retried by the caller's next drain (page load,
+  // reconnect, or the 20-second heartbeat in App.jsx). No self-scheduling timer:
+  // the old one only existed because nothing else ever drained the queue.
 }
+
 /**
  * Serialise writes per document and report the REAL outcome (Bug 30).
  *
@@ -1018,7 +1104,7 @@ async function guardedFirestoreSave(key, saveFn, retryEntry) {
     // here means something escaped it. Route it to the retry queue anyway
     // rather than losing the write silently.
     console.warn('[PersistenceService] Unexpected error escaped a Firestore save:', (err && err.message) || err);
-    if (retryEntry) enqueueFailedWrite(retryEntry);
+    if (retryEntry) noteWriteFailed(retryEntry);
   });
 }
 
@@ -1096,10 +1182,10 @@ export async function saveProjectToFirestore(projectId, metadata) {
       return true;
     } catch (error) {
       console.warn('[PersistenceService] Error saving project to Firestore:', error.message);
-      enqueueFailedWrite({ type: 'project', projectId, data: metadata });
+      noteWriteFailed({ type: 'project', projectId });
       return false;
     }
-  }, { type: 'project', projectId, data: metadata });
+  }, { type: 'project', projectId });
 }
 
 /**
@@ -1228,10 +1314,10 @@ export async function saveWorkspaceToFirestore(projectId, workspaceId, data) {
       return true;
     } catch (error) {
       console.warn('[PersistenceService] Error saving workspace to Firestore:', error.message);
-      enqueueFailedWrite({ type: 'workspace', projectId, workspaceId, data });
+      noteWriteFailed({ type: 'workspace', projectId, workspaceId });
       return false;
     }
-  }, { type: 'workspace', projectId, workspaceId, data });
+  }, { type: 'workspace', projectId, workspaceId });
 }
 
 /**
@@ -1452,10 +1538,10 @@ export async function saveTasksToFirestore(projectId, data) {
       return true;
     } catch (error) {
       console.warn('[PersistenceService] Error saving tasks to Firestore:', error.message);
-      enqueueFailedWrite({ type: 'tasks', projectId, data });
+      noteWriteFailed({ type: 'tasks', projectId });
       return false;
     }
-  }, { type: 'tasks', projectId, data });
+  }, { type: 'tasks', projectId });
 }
 
 /**
@@ -1879,11 +1965,21 @@ export async function manualServerSync(activeProjectId) {
       lastModified: Date.now()
     };
 
+    // Fix 5b: EVERY document is attempted, and the overall result is reported at
+    // the end. This function used to `return false` the moment one write failed,
+    // and project metadata is written first - so a single failing metadata write
+    // meant no canvas was uploaded at all. That is what left the owner's canvas
+    // stuck on "Syncing…" for two minutes in test D2 while its content sat
+    // un-uploaded; adding another card went green only because that took a
+    // different, per-canvas route. A failure on one document is no reason to
+    // abandon the others.
+    let allOk = true;
+
     // Save project metadata (note: saveProjectToFirestore intentionally strips
     // workspaceIds; we re-assert them additively below so this manual sync can
     // never remove a workspace another device added).
     const metaResult = await saveProjectToFirestore(activeProjectId, updatedMeta);
-    if (!metaResult) return false;
+    if (!metaResult) allOk = false;
     await ensureWorkspaceIds(activeProjectId, workspaces.map(ws => ws.id));
 
     // Save all workspaces (skip unchanged ones to avoid spurious revision bumps)
@@ -1906,12 +2002,12 @@ export async function manualServerSync(activeProjectId) {
         lastModified: Date.now()
       };
       const wsResult = await saveWorkspaceToFirestore(activeProjectId, ws.id, wsPayload);
-      if (!wsResult) return false;
+      if (!wsResult) allOk = false;
     }
 
     // Save tasks
     const tasksResult = await saveTasksToFirestore(activeProjectId, { tasks, taskGroups });
-    if (!tasksResult) return false;
+    if (!tasksResult) allOk = false;
 
     // Save userMeta
     await saveUserMeta({ activeProjectId });
@@ -1919,7 +2015,7 @@ export async function manualServerSync(activeProjectId) {
     // Also update localStorage with latest metadata
     saveProjectMeta(activeProjectId, updatedMeta);
 
-    return true;
+    return allOk;
   } catch (error) {
     console.warn('[PersistenceService] manualServerSync failed:', error.message);
     return false;
