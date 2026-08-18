@@ -850,20 +850,38 @@ export default function WorkflowApp() {
   const [storedPassword, setStoredPassword] = useState('');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
 
-  // --- App Mode (Three-Mode Interaction System) ---
-  // Two independent states: editingState controls Full Edit vs Arrange,
-  // isPreviewActive is an overlay that blocks all modifications.
+  // --- App Mode ---
+  // editingState controls Full Edit vs Arrange.
   const [editingState, setEditingState] = useState('fullEdit'); // 'fullEdit' | 'arrange'
-  // The user-toggled preview overlay (editor only). Reference mode does NOT use
-  // this flag; it drives read-only purely through `isPreviewMode` below, so the
-  // two concepts stay decoupled and reference-ness always follows the URL.
-  const [isPreviewActive, setIsPreviewActive] = useState(false);
-  // Derived convenience booleans. isPreviewMode intentionally also covers
-  // reference mode, so every existing `if (isPreviewMode) return` guard (which
-  // blocks edits and suppresses saves) protects reference tabs too. Copy is NOT
-  // guarded by isPreviewMode, so copying still works - exactly what a collector
-  // tab needs.
-  const isPreviewMode = isPreviewActive || isReferenceMode;
+
+  /**
+   * Read-only flag. TRUE for a `/view/` reference tab and nothing else.
+   *
+   * PREVIEW MODE WAS RETIRED HERE (owner's decision).
+   *
+   * There used to be two ways to make the canvas read-only, and the owner
+   * reported - correctly - that they looked the same:
+   *
+   *   - Preview: a toggle in the header (`isPreviewActive`) that locked editing
+   *     in the SAME tab, and unlocked it again on a second click.
+   *   - View: a separate route (`#/view/...`) opened in a new tab, where
+   *     read-only comes from the URL and therefore cannot be switched off.
+   *
+   * The read-only BEHAVIOUR was already shared: both fed this one flag, and every
+   * "don't edit / don't save" check in the app reads it. What differed was how you
+   * entered, and what came with it. View also brings Focus Mode, Shift+D to hide
+   * card descriptions, read-only version preview, no Import/Sync controls, and
+   * (Fix 6) a write gate that refuses every write. Preview brought none of those,
+   * and its tab could start writing again on the next click.
+   *
+   * So Preview was the weaker half of a duplicated idea, and it is gone: the
+   * toggle in the header and the eye icon in the right-hand toolbar are removed,
+   * and the state behind them with them. The flag keeps its name because ~40
+   * guards across this file read it, and they all still mean exactly what they
+   * say. Copy is deliberately NOT guarded by it, so copying out of a View tab
+   * still works - exactly what a collector tab needs.
+   */
+  const isPreviewMode = isReferenceMode;
   const isArrangeMode = editingState === 'arrange';
   const isFullEditMode = editingState === 'fullEdit';
   const editMode = isFullEditMode && !isPreviewMode; // guards inline card text editing
@@ -2916,74 +2934,10 @@ export default function WorkflowApp() {
     toastTimerRef.current = setTimeout(() => setToastMessage(''), 2000);
   }, []);
 
-  // --- Toggle Preview Mode (on/off overlay) ---
-  const togglePreviewMode = useCallback(async () => {
-    // Reference tabs are permanently read-only: they cannot exit into editing.
-    if (isReferenceMode) return;
-    // Capture the transition direction before the state update
-    const wasInPreview = isPreviewActive;
-
-    setIsPreviewActive(prev => {
-      if (!prev) {
-        // Switching to Preview: cancel in-progress editing, clear drag states, close menus
-        setEditingTextNode(null);
-        setDraggingNode(null);
-        draggingNodeRef.current = null;
-        setDraggingGroup(null);
-        setResizingGroup(null);
-        setDraggingImage(null);
-        setDraggingPin(null);
-        setConnecting(null);
-        setContextMenu(null);
-        setNodeContextMenu(null);
-        setGroupContextMenu(null);
-        setOpenColorPicker(null);
-        setOpenLinkPicker(null);
-        setSelectedNodeIds([]);
-        setMobileSheet(null);
-        // Cancel any pending debounced server saves to prevent writes in Preview Mode
-        serverWorkspaceSaverRef.current.cancel();
-        serverTaskSaverRef.current.cancel();
-        serverMetaSaverRef.current.cancel();
-        return true;
-      } else {
-        return false;
-      }
-    });
-
-    // If switching from preview back to editing, hydrate data from storage/server
-    // Use the captured value (wasInPreview) to correctly determine exit direction
-    if (wasInPreview) {
-      try {
-        if (activeProjectId) {
-          const hydrated = await hydrateProject(activeProjectId);
-          if (hydrated) {
-            let targetWorkspaces = (hydrated.workspaces && hydrated.workspaces.length > 0)
-              ? hydrated.workspaces
-              : workspaces;
-            targetWorkspaces = targetWorkspaces.map(ws => {
-              const grps = ws.groups || [];
-              const nds = ws.nodes || [];
-              return { ...ws, groups: computeLayout(grps, nds), nodes: nds, edges: ws.edges || [] };
-            });
-            setWorkspaces(targetWorkspaces);
-            if (hydrated.activeTab) setActiveTab(hydrated.activeTab);
-            if (hydrated.nextId) setNextId(hydrated.nextId);
-            if (hydrated.reminders) setReminders(hydrated.reminders);
-            if (hydrated.pinGroups) setPinGroups(hydrated.pinGroups);
-            if (hydrated.tasks) setTasks(hydrated.tasks);
-            if (hydrated.taskGroups) setTaskGroups(hydrated.taskGroups);
-          }
-        }
-      } catch (err) {
-        console.error('Failed to hydrate project on mode switch:', err);
-      }
-    }
-  }, [activeProjectId, workspaces, isPreviewActive, isReferenceMode]);
 
   // --- Toggle Editing State (Full Edit <-> Arrange) ---
   const toggleEditingState = useCallback(() => {
-    if (isPreviewActive || isReferenceMode) return; // No mode toggling in preview/reference
+    if (isReferenceMode) return; // a read-only View tab has no editing modes to toggle
     setEditingState(prev => {
       if (prev === 'fullEdit') {
         // Entering Arrange: clear any in-progress text editing
@@ -2993,7 +2947,7 @@ export default function WorkflowApp() {
         return 'fullEdit';
       }
     });
-  }, [isPreviewActive, isReferenceMode]);
+  }, [isReferenceMode]);
   toggleEditingStateRef.current = toggleEditingState;
 
   // =========================================================================
@@ -8010,33 +7964,19 @@ export default function WorkflowApp() {
           <button
             onClick={toggleEditingState}
             className={`flex items-center gap-1 px-1.5 sm:px-2.5 py-1 rounded-lg text-xs font-bold transition-all border ${
-              isPreviewMode
-                ? 'bg-amber-50 border-amber-300 text-amber-700 cursor-not-allowed opacity-60'
-                : isArrangeMode
-                  ? 'bg-cyan-50 border-cyan-300 text-cyan-700 hover:bg-cyan-100'
-                  : 'bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100'
+              isArrangeMode
+                ? 'bg-cyan-50 border-cyan-300 text-cyan-700 hover:bg-cyan-100'
+                : 'bg-indigo-50 border-indigo-200 text-indigo-700 hover:bg-indigo-100'
             }`}
-            title={isPreviewMode ? 'Exit Preview to toggle (M)' : (isArrangeMode ? 'Switch to Full Edit (M)' : 'Switch to Arrange (M)')}
-            disabled={isPreviewMode}
+            title={isArrangeMode ? 'Switch to Full Edit (M)' : 'Switch to Arrange (M)'}
           >
             {isArrangeMode ? <MousePointer className="w-3.5 h-3.5" /> : <Pencil className="w-3.5 h-3.5" />}
             <span className="hidden sm:inline">{isArrangeMode ? 'Arrange' : 'Full Edit'}</span>
           </button>
 
-          {/* Preview Mode Toggle */}
-          <button
-            onClick={togglePreviewMode}
-            className={`flex items-center gap-1 px-1.5 sm:px-2.5 py-1 rounded-lg text-xs font-bold transition-all border ${
-              isPreviewMode
-                ? 'bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100'
-                : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
-            }`}
-            title={isPreviewMode ? 'Exit Preview Mode' : 'Enter Preview Mode'}
-          >
-            <Eye className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">{isPreviewMode ? 'Preview' : 'Preview'}</span>
-          </button>
-          {/* Open the current workspace in a NEW read-only Reference tab */}
+          {/* Open the current workspace in a NEW read-only Reference tab.
+              The old "Preview" toggle used to sit here; see the isPreviewMode
+              docblock for why it was retired in favour of this button. */}
           <button
             onClick={() => {
               if (!activeProjectId || !activeTab) return;
@@ -8338,14 +8278,16 @@ export default function WorkflowApp() {
           {/* Floating Mode Indicator Badge (hidden in Focus Mode) */}
           <div className={`absolute bottom-4 left-4 z-[100] pointer-events-none animate-fade-in ${isFocusMode ? 'hidden' : ''}`}>
             <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold shadow-lg border backdrop-blur-sm transition-all duration-200 ${
-              isPreviewMode
+              isReferenceMode
                 ? 'bg-amber-900/80 border-amber-500/50 text-amber-200'
                 : isArrangeMode
                   ? 'bg-cyan-900/80 border-cyan-500/50 text-cyan-200'
                   : 'bg-indigo-900/80 border-indigo-500/50 text-indigo-200'
             }`}>
-              {isPreviewMode ? <Eye className="w-3.5 h-3.5" /> : isArrangeMode ? <MousePointer className="w-3.5 h-3.5" /> : <Pencil className="w-3.5 h-3.5" />}
-              <span>{isPreviewMode ? 'Preview' : isArrangeMode ? 'Arrange' : 'Full Edit'}</span>
+              {isReferenceMode ? <Eye className="w-3.5 h-3.5" /> : isArrangeMode ? <MousePointer className="w-3.5 h-3.5" /> : <Pencil className="w-3.5 h-3.5" />}
+              {/* A View tab used to label itself "Preview", which is the exact
+                  confusion that retiring Preview was meant to end. */}
+              <span>{isReferenceMode ? 'View' : isArrangeMode ? 'Arrange' : 'Full Edit'}</span>
             </div>
           </div>
 
@@ -9081,20 +9023,13 @@ export default function WorkflowApp() {
               {!isReferenceMode && (<>
               <button
                 onClick={toggleEditingState}
-                className={`p-1.5 sm:p-2 rounded-md transition-colors ${isPreviewMode ? 'bg-amber-50 text-amber-600 cursor-not-allowed opacity-60' : (isArrangeMode ? 'bg-cyan-50 text-cyan-600' : 'bg-indigo-50 text-indigo-600')}`}
-                title={isPreviewMode ? 'Exit Preview to toggle (M)' : (isArrangeMode ? 'Switch to Full Edit (M)' : 'Switch to Arrange (M)')}
-                disabled={isPreviewMode}
+                className={`p-1.5 sm:p-2 rounded-md transition-colors ${isArrangeMode ? 'bg-cyan-50 text-cyan-600' : 'bg-indigo-50 text-indigo-600'}`}
+                title={isArrangeMode ? 'Switch to Full Edit (M)' : 'Switch to Arrange (M)'}
               >
                 {isArrangeMode ? <MousePointer className="w-4 h-4 sm:w-5 sm:h-5" /> : <Pencil className="w-4 h-4 sm:w-5 sm:h-5" />}
               </button>
               <div className="h-px w-5 bg-slate-200 my-0.5" />
-              <button
-                onClick={togglePreviewMode}
-                className={`p-1.5 sm:p-2 rounded-md transition-colors ${isPreviewMode ? 'bg-amber-50 text-amber-600' : 'text-slate-600 hover:bg-slate-100'}`}
-                title={isPreviewMode ? 'Exit Preview Mode' : 'Enter Preview Mode'}
-              >
-                <Eye className="w-4 h-4 sm:w-5 sm:h-5" />
-              </button>
+              {/* The retired Preview toggle used to be the eye icon here. */}
               <button
                 onClick={() => { if (!activeProjectId || !activeTab) return; const base = window.location.href.split('#')[0]; window.open(base + '#' + buildViewPath(activeProjectId, activeTab), '_blank', 'noopener'); }}
                 className="p-1.5 sm:p-2 rounded-md transition-colors text-slate-600 hover:bg-slate-100"
@@ -10087,7 +10022,7 @@ export default function WorkflowApp() {
       )}
 
       {/* --- Reminder Notification Stack (Editor route only) --- */}
-      {/* Only shown while editing: excluded from Preview Mode (isPreviewActive) */}
+      {/* Only shown while editing: excluded from read-only View tabs */}
       {/* and the View/reference route (isReferenceMode) via !isPreviewMode. */}
       {!isPreviewMode && !isFocusMode && visibleReminders.length > 0 && (
         <div className="fixed bottom-28 left-1/2 -translate-x-1/2 z-[85] max-w-sm w-full mx-4 flex flex-col gap-2 pointer-events-none">

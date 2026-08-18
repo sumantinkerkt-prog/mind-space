@@ -651,3 +651,49 @@ fail for a real reason when no debug switch is set. With Fix 5b such a failure
 appears in the chip and in the unsaved list, so a normal session will show it. If
 it happens, get the text after `[PersistenceService] Error saving project to
 Firestore:` from the Console.
+
+
+## Preview mode retired (owner's decision, branch `chore/retire-preview-mode`)
+
+The owner asked whether the header's **Preview** and **View** buttons were "the
+same code", said View is better, and asked for Preview to go. The answer, and what
+was done:
+
+**The read-only BEHAVIOUR was already shared.** Both fed one flag,
+`isPreviewMode = isPreviewActive || isReferenceMode` (App.jsx ~866), and every
+"don't edit / don't save" check in the file reads that flag. So the locked-canvas
+part was literally the same code.
+
+**The entry points and the extras were different.**
+
+| | Preview (retired) | View (kept) |
+|---|---|---|
+| How it starts | `togglePreviewMode()` toggling `isPreviewActive`, same tab | the URL: `#/view/:projectId/:workspaceId`, opened in a new tab via `buildViewPath` |
+| Can it be switched off? | Yes, next click - the tab is still an editor tab | No. Read-only follows the URL |
+| Extras | none | Focus Mode, Shift+D hide card descriptions + per-card reveal, read-only version preview, Import/Partial/Sync hidden, and Fix 6's write gate |
+| On exit | re-hydrated the project from storage/cloud | n/a |
+
+So Preview was the weaker half of a duplicated idea. Removed: the header button,
+the eye icon in the right-hand toolbar, the `isPreviewActive` state and
+`togglePreviewMode` (64 lines). Net −65 lines.
+
+**Kept deliberately:**
+
+- The NAME `isPreviewMode`, now simply `= isReferenceMode`. About 40 guards read
+  it; renaming them all would be a large diff through the exact code paths Fixes 1-6
+  just secured. The docblock at its definition explains this.
+- `hydrateProject` - still used by four project-switching paths.
+
+**Also fixed in passing:** the floating mode badge said **"Preview"** in a `/view/`
+tab, which was the very confusion being removed. It now says **"View"**. The
+Full Edit / Arrange button's `isPreviewMode` branches were dead once Preview went
+(they live inside `!isReferenceMode`), so they were simplified rather than left as
+unreachable ternaries.
+
+**Verified in a browser** (credentials neutered, restored after): editor shows no
+Preview button and keeps the View button; the M key still toggles Full Edit ↔
+Arrange; a `/view/` tab still has no Import / Sync-to-Server / hover edit toolbar
+and its badge reads "View". 211 tests, clean build.
+
+Independent of Fix 6 and touches different regions of App.jsx, so the two merge
+cleanly in either order (verified with a test merge).
