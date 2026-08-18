@@ -2027,6 +2027,14 @@ export default function WorkflowApp() {
       // throttled), push them on the next heartbeat while the tab is visible.
       if (document.visibilityState === 'visible') {
         pushDirtyNow();
+        // Fix 5b: drain the failed-write queue here too. It used to be processed
+        // only on page load and on the browser's `online` event, so a failed
+        // upload waited for a reload - and the "waiting to retry" count could not
+        // fall to zero while the app stayed open, which is what made test C3
+        // unpassable. Same gate as every other cloud write.
+        if (cloudUploadAllowed()) {
+          processRetryQueue().catch(() => {});
+        }
         // Auto version snapshot (throttled to ~10 min, only after a real sync).
         // Bug 42: createSnapshot is a CLOUD write. In practice maybeSnapshot's
         // own "only after a successful sync" guard already blocks it after a bad
