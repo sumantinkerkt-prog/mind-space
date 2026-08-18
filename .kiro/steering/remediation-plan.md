@@ -29,7 +29,7 @@ Only these six are in scope. Everything else is explicitly deferred.
 | 4 | 42 | Distinguish "no data" from "couldn't read"; never write or upload defaults after an indeterminate read | **Done** — PR #6, merged. Owner-verified over 3 rounds |
 | 5 | 30 + minimal 43 | `guardedFirestoreSave` must return a real promise; route queued failures to the retry queue; `confirmSynced` clears dirty only if the ack still covers current local content | **Done** — PR #7, merged (`b155ec3`). Owner-tested: 13 of 14 PASS, C3 FAIL |
 | 5b | found by Fix 5's C3 result | The failed-write queue: no frozen payloads, one entry per document, drained during a session, and a failed write must mark its document dirty | **Built** — PR #8, branch `fix/bug-30-43b-retry-queue`, awaiting owner sign-off |
-| 6 | 47 (four leaks only) | Block writes in reference sessions: reminder scheduler metadata, retry-queue execution, canvas-switch local save/flush, `PinPanel` raw setters | Not started |
+| 6 | 47 (four leaks only) | Block writes in reference sessions: reminder scheduler metadata, retry-queue execution, canvas-switch local save/flush, `PinPanel` raw setters | **Built** — PR #9, branch `fix/bug-47-reference-mode-writes`, awaiting owner sign-off |
 
 Then stop and let the owner use the app for 2-3 weeks before anything else.
 
@@ -651,3 +651,109 @@ fail for a real reason when no debug switch is set. With Fix 5b such a failure
 appears in the chip and in the unsaved list, so a normal session will show it. If
 it happens, get the text after `[PersistenceService] Error saving project to
 Firestore:` from the Console.
+
+
+## Fix 6 (Bug 47): a reference tab writes nothing — branch `fix/bug-47-reference-mode-writes`
+
+### The structural problem, which mattered more than the four leaks
+
+The app had a gate for the LOAD VERDICT (`writesAllowed` / `cloudUploadAllowed`,
+Fix 4) whose docblock claimed "every path that persists anything must pass through
+this" — but it was **mode-blind**. Reference-ness was enforced separately, by
+scattering `if (isPreviewMode) return;` / `if (isReferenceMode) return;` through
+roughly twenty individual effects and handlers. Any path added without knowing that
+convention wrote from a `/view/` tab. That is not four bugs, it is one missing
+concept producing four bugs.
+
+Fix 6 folds the mode INTO the gate:
+
+```js
+const routeModeRef = useRef('editor');                       // assigned every render
+routeModeRef.current = isReferenceMode ? SESSION_MODE.REFERENCE : SESSION_MODE.EDITOR;
+const writesAllowed      = () => sessionMayPersist({ mode: routeModeRef.current, outcome: loadOutcomeRef.current });
+const cloudUploadAllowed = () => sessionMayUploadToCloud({ mode: routeModeRef.current, outcome: loadOutcomeRef.current });
+```
+
+**Why a ref and not the boolean.** The mode can change WITHOUT a remount: the
+editor session timer redirects an editor tab to `/view/...` while the app stays
+mounted. Several write paths live in `useCallback(..., [])` closures which would
+keep reading the mode as it was on first render. A ref assigned during render is
+always current, and matches the existing `editorSessionTimerBlockedRef` pattern.
+**Do not "simplify" this to capturing `isReferenceMode` directly.**
+
+Rules extracted to `src/writeGate.js` (pure, 24 tests, full truth table written out
+explicitly rather than derived). It **fails closed**: only `mode === 'editor'` may
+write, so the unbuilt `/shared/` route, and any future print/embed view, are
+read-only by default and must opt in.
+
+### The four leaks, and how much each was actually leaking
+
+Worth recording honestly, because two of the four were latent and a future reader
+should not think they were all live data loss:
+
+| # | Leak | Reality |
+|---|---|---|
+| 1 | Reminder scheduler (App.jsx ~4001) ran its 60s tick and mutated `lastShownAt`/`nextReminderAt` | **Latent.** The metadata autosave blocked the write (`isPreviewMode`), and the notification render is also `!isPreviewMode` (App.jsx ~10092), so no write and no pop-up. One guard removal from writing project settings every minute. |
+| 2 | Retry-queue drain on init and on `online` (App.jsx ~2131) | **LIVE, and into the cloud.** Only gated by `cloudUploadAllowed()`, which was true on a healthy `/view/` load. A read-only tab uploaded the editor tab's queued writes. The in-code comment there already said reference gating "belongs to Fix 6". |
+| 2b | The same call inside the 20s heartbeat (added by Fix 5b) | Already safe — that whole effect returns on `isReferenceMode`. Do not remove that guard. |
+| 3 | `handleCanvasSwitch` (App.jsx ~5179) wrote the canvas being left to localStorage and flushed pending cloud writes | **LIVE, to local storage. Measured in a browser.** Fixed by extending the existing early-out, NOT by returning: `setActiveTab` must still run or a viewer cannot navigate. |
+| 4 | `setPinGroups` and `setReminders` passed raw to PinPanel / ReminderPanel (7 reminder handlers + 5 pin-group mutators) | **Not to storage, but the panels lied.** Measured: a viewer could add a pin group, it appeared in the list, and was silently discarded on reload. Now guarded at the setter (`setPinGroupsIfEditable`, `setRemindersIfEditable`) so it is safe wherever the call comes from. |
+
+Also made explicit: the dirty-flag branch at App.jsx ~1653 now checks
+`!isReferenceMode` as well, because `writesAllowed()` being false in a reference
+tab would otherwise make it log "this load was not trustworthy", which would be a
+false diagnosis.
+
+### Deliberately still written by a reference tab (owner told, decision open)
+
+Per-device interface preferences, not project data, and one of them exists FOR
+presenting. Recorded so nobody "fixes" them by accident:
+
+- `tf-panel-width-pct` (App.jsx ~809) — panel width.
+- `tf-view-show-card-descriptions` (App.jsx ~709) — the Shift+D choice, whose own
+  comment says it is persisted so a presenter's choice sticks.
+- `nexus-clipboard*` — `copyNode` is deliberately not preview-gated; copying out is
+  what a collector tab is for.
+- `thoughtflow-tab-id` (App.jsx ~2260) — 4-second heartbeat, only on browsers
+  without BroadcastChannel.
+
+The owner was asked in MANUAL-TEST-FIX6.md §1 whether they want literally zero
+writes; if they say yes, each is a one-line change.
+
+### Verification
+
+**235 unit tests** (211 before + 24 for the gate). `npm run build` clean.
+
+**Browser differential, run twice against the same script — once on `main`, once on
+this branch** (Firebase credentials neutered first, restored after):
+
+| Check | `main` | this branch |
+|---|---|---|
+| View tab: switch canvas, open panels, wait 70s → stored keys | **`cm-ws-proj-default-ws-1` CHANGED** | nothing changed at all |
+| View tab: add a pin group | **appeared in the list** (and was not stored) | does not appear |
+| Editor tab: same canvas switch | writes `cm-proj-*`, `cm-ws-*`, `cm-last-location` | identical — no regression |
+| Editor tab: add a pin group | saved into `cm-proj-*` | identical — no regression |
+
+**What could NOT be verified in the sandbox, and is said plainly in the test doc:**
+
+- **Leak 2 is untestable locally.** With no working cloud the app enters local-only
+  mode, where `cloudUploadAllowed()` is false for an unrelated reason, so the code
+  path cannot be reached on either build. Only the owner's Group C (retry-queue
+  counters unchanged in a View tab) can demonstrate it.
+- **Leak 1 has no observable symptom** on either build, because pop-ups were
+  already suppressed at render and the state it changed was never persisted. The
+  fix rests on the code change plus the gate's tests. Do not let a future summary
+  claim the owner verified it.
+
+### After Fix 6 sign-off
+
+1. **Remove the three debug switches** — `cm-debug-simulate-cloud-failure`,
+   `cm-debug-slow-cloud-write`, `cm-debug-fail-cloud-write` — and their references
+   in MANUAL-TEST-PR6/PR7/FIX5B/FIX6. Deliberately NOT done in this PR: they are
+   what makes Fix 6's Group C testable, so they must survive until it passes.
+   Removing them will break the panic lines in every existing test doc; that is
+   fine, but say so when you do it.
+2. **Then stop.** The owner uses the app for 2-3 weeks before any further work.
+   The one-tab rule can relax once this is merged, but the one-DEVICE rule stays.
+3. Still owed, documentation only: the five corrections to TESTING-PR2.md carried
+   since PR #2, and the optional `manualServerSync` narrowing recorded under Fix 5b.
