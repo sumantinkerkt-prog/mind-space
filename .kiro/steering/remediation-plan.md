@@ -912,3 +912,30 @@ it.
     scripted edit left a missing comma in an import list. `vitest` passed (it does not
     compile App.jsx), and the blank page was only caught by a browser check. Tests
     passing is not the same as the app loading.
+
+
+### Owner sign-off (Fix 6, PR #9, second attempt): 13 of 13 PASS
+
+Same owner, same app, same real Firebase — the two checks that failed the first
+attempt both pass now, and both are decisive rather than inferred:
+
+- **B4** — `YOUR_DATA_must_be_empty: "nothing written - PASS"`. The only change in the
+  whole browser was `nexus-clipboard-multi`, from the Ctrl+C in step B3, which is on
+  the allowed list. `cm-dirty-flag` did not appear either, so closing the editor tab
+  left nothing behind to confuse the reading. Baseline covered 24 stored items and
+  **included the View tab's own load**, which is where the first attempt leaked.
+- **C4** — with only the View tab alive, the retry queue held at `totalWaiting: 3`
+  with `triesSoFar` `1 / 1 / 0` before and `1 / 1 / 0` after 90 seconds. Only
+  `minutesOld` moved (2 → 4), which is just age. **Zero upload attempts by the
+  viewer.** This is the only evidence that exists for the cloud leak, because the
+  sandbox cannot reach that path at all.
+- **B2** — `LINE P` reported `thisTabIs: viewer`, `willRefuseAllWrites: true`.
+- A1-A3 and D1-D2 confirm the editor and the reading experience are unaffected.
+
+**Worth recording honestly:** `writesItHasRefused` stayed `none so far` throughout.
+That means nothing in the View tab even *attempted* a write, so the boundary was never
+exercised in the owner's session — the older App-level guards stopped everything
+first. Both layers held; only one of them was tested by this run. The boundary's own
+behaviour rests on the 39 automated tests.
+
+Merged as part of PR #9.
