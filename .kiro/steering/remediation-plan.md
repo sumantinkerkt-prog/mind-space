@@ -757,3 +757,69 @@ this branch** (Firebase credentials neutered first, restored after):
    The one-tab rule can relax once this is merged, but the one-DEVICE rule stays.
 3. Still owed, documentation only: the five corrections to TESTING-PR2.md carried
    since PR #2, and the optional `manualServerSync` narrowing recorded under Fix 5b.
+
+
+## FOUND, NOT FIXED: the reminder list wipes itself silently
+
+Reported by the owner during Fix 6 testing ("all the reminders wipe out, and it
+happened silently"), then reproduced in a browser. **Not caused by Fix 5, 5b or 6** —
+every line involved predates them. Small data, but it is silent loss of project
+settings, which is the exact class this remediation exists to remove.
+
+**Two rules in the code contradict each other.**
+
+1. `App.jsx` ~1272 (cloud-load metadata hydration loop) and ~1435 (migration
+   write-back) both do `reminders: proj.reminders || []`. If the source document has
+   **no** `reminders` field, "not found" is written down as **an explicitly empty
+   list**.
+2. `App.jsx` ~1489 hydrates state with `activeProj.reminders || DEFAULT_REMINDERS`.
+   **In JavaScript an empty array is truthy**, so `[]` counts as a real answer and
+   the 8 built-in reminders never come back.
+
+Rule 1 converts the self-healing case (field missing) into the sticky case (field
+empty). After that the list stays empty forever, with no message.
+
+**Reproduced in a real browser** (credentials neutered): with `reminders: []` stored,
+the panel shows "No reminders yet", counter `0/0`, and repeated reloads never restore
+the built-ins. Delete the `reminders` FIELD instead and one reload restores all 8
+(`7/8` enabled) and re-saves them. So the difference between "empty" and "missing" is
+the whole bug.
+
+Two related facts found while checking:
+
+- **A brand-new project is created with `reminders: []`** (App.jsx ~4619/4630), so a
+  new project starts with zero reminders rather than the 8 built-ins. Same for
+  duplicate-project (~4970) and import-all (~5488).
+- **`exportData` does NOT include reminders or pinGroups** — it is
+  `{ workspaces, activeTab, nextId, tasks, taskGroups }` (App.jsx ~5308). The owner's
+  weekly export files therefore cannot restore a lost reminder list. Worth telling
+  them before promising any recovery from a backup.
+
+**Recovery is unreliable while the cloud copy is empty**, because the hydration loop
+re-copies the cloud value on every load. Deleting the local field helps only if the
+CLOUD document also lacks the field (then state falls back to the built-ins each
+load). If the cloud holds `[]`, the fix has to be in code.
+
+**Proposed fix (owner asked to decide, not yet approved):** stop writing `|| []` in
+the two hydration paths (leave the field alone when the source has none), and treat
+an empty list as "use the built-ins", which is what the snapshot-restore path at
+~1920 already does (`d.meta.reminders && d.meta.reminders.length ? ... : DEFAULT_REMINDERS`).
+The init path is simply inconsistent with it. Keep it a separate PR after #10.
+
+## Manual test document: reminders removed from the owner's test
+
+The Fix 6 document originally asked the owner to toggle a reminder (A4) to prove the
+new guarded setter still works in an editor tab. Two rounds of feedback later, that
+step is **deleted**: reminders are a known-buggy area, the owner had just lost their
+list, and asking them to click a broken feature to test an unrelated fix was a bad
+trade. **I verified both halves myself in a browser instead**, and the test document
+says so rather than implying the owner checked it:
+
+- Editor tab: clicking a reminder's Disable switch changed stored state (7 enabled →
+  6, `Drink Water=off` persisted).
+- View tab: 8 switches render, clicking one changes **nothing** — not the stored data
+  and not even the panel's own `7/8` counter.
+
+General lesson for future test docs: **never ask the owner to exercise a feature that
+is on the known-broken list in order to test something else.** Verify it yourself and
+report it, or leave it out.
