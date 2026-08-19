@@ -823,3 +823,92 @@ says so rather than implying the owner checked it:
 General lesson for future test docs: **never ask the owner to exercise a feature that
 is on the known-broken list in order to test something else.** Verify it yourself and
 report it, or leave it out.
+
+
+## Fix 6, SECOND ATTEMPT: the viewer boundary (the owner's model)
+
+The first attempt (commit `8c70953`) **failed the owner's test**, and the owner then
+described the architecture they actually wanted. They were right, and it is simpler
+than what the code had grown into:
+
+```
+EDITOR <-> SERVER    read and write
+VIEWER  <- SERVER    read only, one way: "load a copy and disconnect"
+```
+
+### Why attempt one failed
+
+It guarded **call sites** — roughly forty `if (isPreviewMode) return;` /
+`if (!isReferenceMode)` / `if (!writesAllowed())` checks spread through App.jsx. The
+load sequence alone calls `saveWorkspaceToLocal`, `saveProjectMeta` and
+`seedSyncState` from about a dozen places, and guarding them one at a time is
+guesswork you cannot prove complete. The owner's Group B result showed four canvases,
+`cm-sync-state`, `cm-proj-*` and `cm-last-snapshot` changing during a View session.
+
+### The fix: one gate, at the boundary
+
+`src/sessionRole.js` (pure, 10 tests) answers one question: is this tab a viewer?
+`persistenceService.js` — the only module that owns storage — refuses **24** distinct
+writes when it is, via `viewerMustNotWrite(label)`. Covered: `cm-meta`, project
+metadata, canvases, canvas removal, tasks, the whole sync-state map (which covers
+`markDirty` / `seedSyncState` / `confirmSynced` / `rebaseDirty` in one place),
+tombstones, the retry queue and its drain, the device name, `guardedFirestoreSave`,
+`transactionalWrite`, all five Firestore savers, the three workspace-list mutators,
+the two delete paths, `manualServerSync` and `createSnapshot`. `imageStorageService`
+guards its three Storage calls the same way.
+
+Reads are deliberately untouched.
+
+**Role detection fails to EDITOR, not viewer** (`roleFromLocation`). Note this is the
+opposite choice from `writeGate.js`, on purpose: that predicate answers "is it safe to
+save?" and must fail closed, while this one only ADDS a restriction, and a parsing
+quirk defaulting to viewer would stop the real editor from saving — a worse failure
+than the leak. Being a viewer requires a `/view/` URL, which is unambiguous.
+App.jsx also calls `setSessionRole()` on every render so the answer follows the
+router explicitly, not just the sniffed URL.
+
+**localStorage counts as a write, and this is worth defending.** The owner's note said
+a viewer may make local changes as long as nothing reaches the server. But this app's
+localStorage is not private to the tab: an editor tab on the same device reads the
+same keys and uploads them, so a "local only" viewer write can reach the server later
+through the editor. In-memory state (pan, zoom, hide descriptions, clipboard) stays
+free.
+
+**A read-only diagnostic is exposed in production**: `window.mindspace.probe()` →
+`{ role, wouldBlockWrites, refusedSoFar }`. Unit tests cannot prove that a real tab on
+a real `/view/` URL is recognised; this lets the owner ask the running tab. It exposes
+no writers. Verified in a browser: `editor` on `#/editor/`, `viewer` on `#/view/`, and
+it flips correctly when a tab's URL changes to `/view/` **without a reload** — the
+editor-session-timer case.
+
+### Verification
+
+**284 tests** (245 + 39 new). `src/viewerBoundary.test.js` calls every writer twice:
+as a viewer (storage must be untouched) and as an editor (it must still write). The
+editor half is not decoration — a gate that blocked everyone would pass the viewer
+half and break the app. Browser: a View tab loads, switches canvas, opens panels, sits
+45s → **no `cm-*` change at all**; an editor tab doing the same switch still writes
+`cm-proj-*`, `cm-ws-*`, `cm-last-location`.
+
+**Still not verifiable in the sandbox:** the cloud-upload leak. Without a working
+cloud the app enters local-only mode, where uploads are blocked for an unrelated
+reason, so that path is unreachable on either build. Only the owner's Group C reaches
+it.
+
+## Testing lessons from this round (expensive ones)
+
+9. **A localStorage snapshot cannot tell you WHICH TAB wrote.** Both of the owner's
+   FAILs came from this. Their editor tab was open beside the View tab, doing its
+   normal autosave and its ten-minute snapshot, and my LINE S/LINE X pair blamed the
+   View tab. `cm-last-snapshot` was the giveaway: only an editor tab can write it.
+   **Any "did this tab write?" test must leave exactly one tab running** — take the
+   baseline, close the other tab, then act. Doing so also brought the View tab's own
+   LOAD inside the measurement, which is where the real leak was.
+10. **Do not take a baseline in one tab and the reading in another.** Group C's
+    "before" numbers were taken in the editor tab, which then kept retrying uploads
+    every 20 seconds by itself. The numbers had already moved before the viewer did
+    anything.
+11. **`npm run build` after EVERY App.jsx edit, not just after the last one.** A
+    scripted edit left a missing comma in an import list. `vitest` passed (it does not
+    compile App.jsx), and the blank page was only caught by a browser check. Tests
+    passing is not the same as the app loading.

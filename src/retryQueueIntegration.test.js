@@ -268,10 +268,18 @@ describe('attempts are counted once each, then given up on', () => {
 });
 
 describe('manualServerSync no longer abandons the canvases', () => {
+  // manualServerSync skips a canvas whose `lastModified` is not newer than the last
+  // successful sync, and that record lives in a module-level map which survives
+  // between tests here. Stamping the body clearly in the future keeps these two tests
+  // independent of how quickly the ones above them ran - without it they pass or fail
+  // depending on whether two tests share a millisecond.
+  const freshBody = (title) => ({ ...wsBody(title), lastModified: Date.now() + 60000 });
+
   it('uploads every canvas even when the project-settings write fails', async () => {
     // Only the project metadata document fails - the D2 situation.
     failPaths.add(META_DOC);
-    markDirty(wsPath(P, W), wsBody('original'));
+    saveWorkspace(P, W, freshBody('original'));
+    markDirty(wsPath(P, W), freshBody('original'));
     markDirty(metaPath(P), null);
 
     const ok = await manualServerSync(P);
@@ -284,7 +292,8 @@ describe('manualServerSync no longer abandons the canvases', () => {
   });
 
   it('reports success when everything really did upload', async () => {
-    markDirty(wsPath(P, W), wsBody('original'));
+    saveWorkspace(P, W, freshBody('original'));
+    markDirty(wsPath(P, W), freshBody('original'));
     markDirty(tasksPath(P), { tasks: [], taskGroups: [] });
 
     const ok = await manualServerSync(P);

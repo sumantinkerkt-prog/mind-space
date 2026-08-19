@@ -42,6 +42,7 @@ import {
   summarizeReadFailures,
 } from './loadOutcome';
 import { SESSION_MODE, sessionMayPersist, sessionMayUploadToCloud } from './writeGate';
+import { SESSION_ROLE } from './sessionRole';
 import { uploadImage as uploadImageToStorage, deleteImage as deleteImageFromStorage, deleteWorkspaceImages } from './imageStorageService';
 import {
   saveProjectMeta,
@@ -107,7 +108,8 @@ import {
   maybeSnapshot,
   createSnapshot,
   listSnapshots,
-  loadSnapshot
+  loadSnapshot,
+  setSessionRole,
 } from './persistenceService';
 
 // --- Premium Color Themes (10 colors) ---
@@ -611,6 +613,12 @@ export default function WorkflowApp() {
    */
   const routeModeRef = useRef('editor');
   routeModeRef.current = isReferenceMode ? SESSION_MODE.REFERENCE : SESSION_MODE.EDITOR;
+
+  // Tell the persistence layer what this tab is, on every render, so it follows the
+  // same source of truth as the router - including the editor-session timer, which
+  // turns an editor tab into a viewer tab without a reload. persistenceService can
+  // work this out from the URL by itself; this makes it explicit rather than sniffed.
+  setSessionRole(isReferenceMode ? SESSION_ROLE.VIEWER : SESSION_ROLE.EDITOR);
 
   /**
    * THE write gate. Every path that persists anything - localStorage, Firestore,
@@ -2082,6 +2090,10 @@ export default function WorkflowApp() {
   // Save a losing copy so a conflict resolution can NEVER lose data. Phase 3
   // will surface these in a history UI; for now they live in localStorage.
   const saveConflictBackup = useCallback((conflict) => {
+    // Fix 6: a viewer never writes, not even a backup. It cannot raise a
+    // conflict in the first place (it does no freshness check and no upload),
+    // so this is belt and braces on a shared localStorage key.
+    if (isReferenceMode) return;
     try {
       const key = 'cm-conflict-backups';
       const list = JSON.parse(localStorage.getItem(key) || '[]');
@@ -2095,7 +2107,7 @@ export default function WorkflowApp() {
       while (list.length > 30) list.shift();
       localStorage.setItem(key, JSON.stringify(list));
     } catch { /* ignore */ }
-  }, []);
+  }, [isReferenceMode]);
 
   // Resolve a per-document conflict. Both copies always survive (the loser is
   // backed up first). 'cloud' keeps the server version; 'mine' overwrites cloud.

@@ -23,45 +23,64 @@ section 10 for what I found out about your missing reminders.
 
 ## 2. What this fix does
 
-You have two kinds of tab.
+You told me the model you want, and it is simpler than what the code had grown into:
 
-An **editor tab** is for working. It saves what you do. That is correct.
+- **Editor and server talk both ways.** The editor asks for the latest data, works
+  on it, and sends it back. The server keeps the latest version.
+- **Viewer and server talk one way only.** The viewer asks for the data, gets a
+  copy, and that is the end of it. To see newer data it asks again — that is what a
+  reload is. The server never takes anything back from a viewer.
 
-A **View tab** is for looking. It should save **nothing at all**. That is the whole
-point of it. You can open a View tab, leave it open, walk away, and know that it is
-not touching your data.
+That is now how it works. "Load a copy and disconnect."
 
-I found four places where a View tab did touch things. All four are now blocked.
+### Why my first attempt failed your test
 
-| What went wrong | How bad it was |
-|---|---|
-| A View tab finished off uploads that had failed earlier in your editor tab, and sent them to the cloud itself. | **Bad. This one really did reach your cloud.** Group C tests it. |
-| Moving to another canvas in a View tab saved the canvas you left. | **Bad.** I measured it. The saved copy of the canvas changed. |
-| A viewer could add or delete a pin group, and switch reminders on and off. | **Not saved anywhere — but the screen lied.** You clicked, it looked like it worked, and it vanished on reload. |
-| A timer kept running in a View tab. Every 60 seconds it changed when each reminder was next due. | **Nothing was saved.** Two other checks happened to stop it. But it was one small change away from writing to your project every minute. |
+You found two things I had not. You were right both times.
 
-I also fixed the reason all four could happen. The app had one place that asked "is
-it safe to save right now?" But that question only asked whether your data had
-loaded properly. It never asked "am I a View tab?" Now it asks both. So a new
-piece of code cannot forget this rule in future.
+My first attempt put a "do not write" check in front of each place that writes —
+about forty of them, spread through the app. Your Group B result showed that was not
+enough: four canvases and other data still changed. Loading alone writes data from
+about a dozen places, and I had missed some.
 
-### Four small things a View tab may still change
+So I moved the rule. There is now **one gate**, inside the single file that owns all
+storage. Every save in the app goes through that file. If a viewer's save is refused
+there, no other part of the app can leak, because there is no other door. If a new
+feature is added next year, it cannot forget the rule, because it does not get a
+choice.
 
-None of these is your project data. They are settings for this browser only.
-They cannot damage anything.
+This is the change you asked for. It is also **less** code than chasing the call
+sites: one gate, 24 refusals, and a test that checks every single one.
+
+### Local saving counts as saving, too
+
+One thing worth adding to your model. You said the viewer can make local or
+temporary changes as long as nothing reaches the server. Almost — with one catch.
+
+This app's local storage is **not private to the tab**. An editor tab on the same
+computer reads the same local data and uploads it. So something saved "only locally"
+by a viewer can still reach the server later, through the editor. That is how your
+four canvases could have travelled.
+
+So the viewer saves nothing at all — not to the server, not locally.
+Things that live only in memory are still yours to play with: panning, zooming,
+hiding descriptions, copying a card. Those are private to the tab and stay allowed.
+
+### Four small things a View tab still writes
+
+None of these is your project data. They are settings for this browser only, and
+they never go to the server.
 
 1. How wide you dragged a side panel.
 2. Whether card descriptions are hidden (the **Shift+D** setting, made for
    presenting).
-3. The clipboard, when you copy a card. Copying out is the main reason to use a
-   View tab.
-4. A small marker that some browsers use to notice the app is open twice.
+3. The clipboard, when you copy a card. Copying out is the main reason for a View tab.
+4. A small marker some browsers use to notice the app is open twice.
 
 The check in Group B lists these on their own line, so when you see them you know
 they are fine.
 
-**If you want a View tab to change nothing at all, not even these four, tell me.**
-Each one is a one-line change.
+**If you want a View tab to write nothing whatsoever, tell me.** Each is a one-line
+change.
 
 ---
 
@@ -83,11 +102,11 @@ Each one is a one-line change.
 Use **View**. It is the one that opens a new browser tab.
 Ignore **Preview**. The next change (pull request #10) removes it.
 
-**2. This test asks you to have an editor tab and a View tab open at the same time.**
-I know we agreed not to do that. That rule exists *because* of the leaks I am fixing
-here. So the only way to check they are gone is to do the thing that used to be
-unsafe. Group C tells you when to close which tab. After this is merged, having both
-open is fine.
+**2. Only one tab runs at a time in this test.** Groups B and C tell you to close
+the editor tab before letting the View tab run. That is deliberate: last time both
+tabs were open, and the editor tab's normal background saving got blamed on the View
+tab. Two of your FAILs came from that. Please follow the close-the-tab steps exactly
+— they are what make the answer trustworthy.
 
 ---
 
@@ -106,7 +125,7 @@ I call this **the reset line**.
 
 ---
 
-## 5. The four lines you will paste
+## 5. The five lines you will paste
 
 You do not need to understand them. Each one prints an answer. None of them
 changes your work.
@@ -126,6 +145,16 @@ tried each one.
 
 ```
 (()=>{let q;try{q=JSON.parse(localStorage.getItem('cm-retry-queue')||'[]')}catch{return 'the retry queue itself is unreadable (corrupt) - tell Kiro'}if(!Array.isArray(q))return 'the retry queue is not a list - tell Kiro';if(!q.length)return 'queue empty - nothing waiting to retry';const m=JSON.parse(localStorage.getItem('cm-meta')||'{}');const pn=(p)=>{try{return (JSON.parse(localStorage.getItem('cm-proj-'+p)||'{}').name)||p}catch{return p}};const wn=(p,w)=>{try{return (JSON.parse(localStorage.getItem('cm-ws-'+p+'-'+w)||'{}').name)||w}catch{return w}};const rows=q.map(e=>({what:e.type==='project'?'project settings':(e.type==='tasks'?'task list':'canvas'),project:pn(e.projectId),canvas:e.workspaceId?wn(e.projectId,e.workspaceId):'-',minutesOld:Math.round((Date.now()-(e.firstFailedAt||e.timestamp||Date.now()))/60000),triesSoFar:e.retryCount||0,isProjectImOn:e.projectId===m.activeProjectId}));return JSON.stringify({totalWaiting:q.length,rows},null,1)})()
+```
+
+**LINE P — what kind of tab am I in?**
+Ask the app directly. `thisTabIs` says `editor` or `viewer`. `willRefuseAllWrites`
+says whether this tab will refuse to save anything. `writesItHasRefused` lists any
+save it has already blocked — so if the app ever *tries* to save from a View tab,
+this is where you will see it.
+
+```
+(()=>{try{const p=window.mindspace.probe();return JSON.stringify({thisTabIs:p.role,willRefuseAllWrites:p.wouldBlockWrites,writesItHasRefused:p.refusedSoFar.length?p.refusedSoFar:"none so far"},null,1)}catch(e){return "This build does not have the check - tell Kiro ("+e.message+")"}})()
 ```
 
 **LINE S — "remember how everything looks right now".**
@@ -155,27 +184,32 @@ LINE X prints two parts:
 
 ## Test 0 — am I testing the right build?
 
-Two minutes. It stops you doing 20 minutes of work on the wrong version.
+One minute.
 
 1. Open the Preview link. Wait until your project appears.
-2. Click **View** in the top bar. A new browser tab opens.
-3. Look at the address of the new tab. It has `#/view/` in it.
-4. In that View tab, press the **S** key. A sidebar appears on the left.
-5. Click **Pins** in the sidebar. The Pins panel opens on the right.
-6. In the Pins panel, find the small **stacked-layers icon**. Hover it — the
-   tooltip says "Manage Groups". Click it. A box appears saying "New group name…".
-7. Type `FIX6 TEST GROUP` in that box. Click **Add**.
+2. Open the Console (**F12**, then **Console**).
+3. Paste **LINE P**.
 
-**Now look at the group list and the "All Groups" dropdown.**
+**What should happen:** it says `"thisTabIs": "editor"` and
+`"willRefuseAllWrites": false`.
 
-| What you see | What it means |
+| What you get instead | What it means |
 |---|---|
-| Nothing happened. No new group anywhere. | ✅ Right build. Go on to Group A. |
-| The group `FIX6 TEST GROUP` appeared. | ❌ Wrong build. The Preview link has not updated yet. Stop and tell me. |
+| `This build does not have the check` | ❌ Wrong build — the Preview link has not updated. Stop and tell me. |
 
-8. Leave this View tab open. Group B uses it.
+4. Now click **View** in the top bar. A new browser tab opens. Its address has
+   `#/view/` in it.
+5. In that **View tab**, open the Console and paste **LINE P** again.
+
+**What should happen:** `"thisTabIs": "viewer"` and `"willRefuseAllWrites": true`.
+
+| What you get instead | What it means |
+|---|---|
+| `"thisTabIs": "editor"` in the View tab | ❌ Something is wrong. Stop and tell me. |
 
 **Result: ☐ Right build ☐ Wrong build — I stopped**
+
+6. Close the View tab for now. Group B opens a fresh one.
 
 ---
 
@@ -234,39 +268,68 @@ and you can remove it.
 
 # GROUP B — the View tab must not change anything
 
-Do all of Group B in the **View tab** you opened in Test 0.
+## Why this group changed since last time
 
-## B1 — Take the "before" note
+Last time this group said FAIL, and **it was my test that was wrong, not your app.**
 
-1. Paste **LINE S**.
+The lines I gave you look at the whole browser's stored data. They cannot tell
+**which tab** wrote something. You had your editor tab open at the same time, and
+that editor tab kept doing its normal job in the background — saving the card you
+dragged in A2, taking its ten-minute version snapshot, and so on.
 
-**What should happen:** it says `recorded the state of N stored items…`
-(N is some number.)
+One item in your result proves it: `cm-last-snapshot`. Only an editor tab can write
+that. A View tab has no code path that reaches it. So at least part of what you saw
+was the editor tab, being blamed on the View tab.
+
+That was my fault twice over: my test could not tell them apart, and I told you to
+leave both tabs open.
+
+**The fix is simple: only one tab runs at a time.** Below, you take the "before"
+note in the editor, then close the editor, and only then let the View tab run. After
+that, anything that changes can only be the View tab.
+
+This version is also stronger than the last one, because closing the editor first
+means the **View tab's own loading** is inside the measurement. Loading was where
+the leak actually was.
+
+## B1 — Take the "before" note, in the editor tab
+
+1. Go to the **editor tab**.
+2. Wait until the chip shows green **Saved**. Do not skip this — it means there is
+   nothing half-finished for the editor to write on its way out.
+3. Paste **LINE S**.
+
+**What should happen:** `recorded the state of N stored items…`
 
 ☐ Ready
 
-## B2 — Act like someone who is only reading
+## B2 — Close the editor, then open the View tab
 
-Still in the View tab. Do all six of these.
-
-1. **Switch canvas.** Use the canvas-name dropdown at the top. Go to a second
-   canvas. Then come back.
-   *(Before this fix, this quietly re-saved the canvas you left.)*
-2. **Try to add a pin group.** Press **S**, click **Pins**, click **Manage
-   Groups**, type `FIX6 B2`, click **Add**. **Nothing should happen.** That is
-   correct here.
-3. **Copy a card.** Click a card, press **Ctrl+C**. *(This one is meant to work.)*
-4. **Make a panel wider.** Drag the left edge of the open panel.
-   *(Allowed — it is a browser setting. See section 2.)*
-5. **Now leave it alone for 90 seconds.** Do not click anything. Do not move the
-   mouse over the canvas. Just wait.
-   *(This matters. It lets the app's background jobs run. Two of the four leaks
-   were background jobs.)*
-6. Do not open the reminder panel.
+1. Still in the editor tab, click **View**. A new tab opens.
+2. **Now close the editor tab.** Only the View tab is left running.
+3. In the View tab, **reload the page** (F5).
+   *(This puts the View tab's own loading inside the test. Loading is where the
+   trouble was.)*
+4. Paste **LINE P**. It must say `"thisTabIs": "viewer"`.
 
 ☐ Done
 
-## B3 — Read the answer
+## B3 — Act like someone who is only reading
+
+All of this in the View tab. The editor tab stays closed.
+
+1. **Switch canvas.** Use the canvas-name dropdown at the top. Go to a second
+   canvas, then come back.
+2. **Try to add a pin group.** Press **S**, click **Pins**, click **Manage
+   Groups**, type `FIX6 B3`, click **Add**. Nothing should happen.
+3. **Copy a card.** Click one, press **Ctrl+C**. *(Meant to work.)*
+4. **Make a panel wider.** Drag the left edge of the open panel. *(Allowed.)*
+5. **Leave it alone for 90 seconds.** Do not click anything. This lets the
+   background jobs run.
+
+☐ Done
+
+## B4 — Read the answer
 
 1. Paste **LINE X**.
 
@@ -276,11 +339,20 @@ Still in the View tab. Do all six of these.
 "YOUR_DATA_must_be_empty": "nothing written - PASS"
 ```
 
-The other part, `per_device_ui_prefs_allowed`, may list one or more of the four
-harmless settings from section 2. That is fine.
+The other part, `per_device_ui_prefs_allowed`, may list the harmless browser
+settings from section 2. That is fine.
 
-**If anything is listed under `YOUR_DATA_must_be_empty`, copy the whole answer and
-send it to me.** That would be a leak I have not found.
+**One exception to expect:** if the only thing listed under
+`YOUR_DATA_must_be_empty` is `cm-dirty-flag`, that is the editor tab's goodbye note
+from when you closed it, not the View tab. Anything else is a real finding — copy
+the whole answer and send it to me.
+
+2. Paste **LINE P** once more and look at `writesItHasRefused`.
+
+- `none so far` means nothing even tried to save. Good.
+- A list of names means the app **tried** to save and the new gate **stopped it**.
+  That is also a pass — and it is interesting, because on the old build those would
+  have gone through. Please send me the list if you see one.
 
 ☐ PASS ☐ FAIL ☐ BLOCKED
 
@@ -288,78 +360,81 @@ send it to me.** That would be a leak I have not found.
 
 # GROUP C — a View tab must not upload your editor's failed uploads
 
-This is the leak that really reached your cloud. **Group C is the only test of it.**
-I could not test it myself, because my sandbox has no working cloud to upload to.
+This is the leak that reached your cloud. **Only you can test it** — my sandbox has
+no working cloud to upload to.
 
-**The idea, in plain words:**
-First we make some uploads fail on purpose in the editor tab. They pile up in a
-waiting list. Then we close the editor tab, so only the View tab is left running.
-Then we check that the waiting list did not move. If the View tab were still
-uploading, the "tries so far" numbers would go up.
+## Why this group changed since last time
 
-**Read all of Group C before you start it.**
+Same problem as Group B. You wrote the "before" numbers down **in the editor tab**,
+and the editor tab kept retrying those uploads by itself every 20 seconds while you
+were opening the View tab. So the numbers had already moved before the View tab did
+anything. In your second run the count had already gone up before C1 even finished —
+that is the editor, not the viewer.
+
+**The fix: take the "before" numbers inside the View tab, after the editor is
+closed.** Then nothing else is running and the numbers can only move if the View tab
+moves them.
 
 ## C1 — Make some uploads fail, in the editor tab
 
-1. Go to the **editor tab**. Paste the **reset line** (section 4). Reload the page.
+1. In the **editor tab**, paste the **reset line** (section 4). Reload the page.
 2. Paste **LINE C**. It must say `queue empty - nothing waiting to retry`.
-   If it does not, paste the reset line again and reload.
-3. Paste this. It makes uploads fail on purpose:
+3. Paste this to make uploads fail on purpose:
    ```
    localStorage.setItem('cm-debug-fail-cloud-write','1'); 'uploads will now fail'
    ```
 4. Add a card. Title it `FIX6 C1`. Wait about 10 seconds.
-5. Paste **LINE C**. **Write both numbers down:**
 
-**`totalWaiting` = __________    `triesSoFar` = __________**
-
-*(Your card is safe. It is saved on your computer. It will upload properly in C4.)*
-
-☐ Ready
-
-## C2 — Leave only the View tab running
-
-1. Still in the editor tab, click **View**. A fresh View tab opens.
-   (If you still have the one from Group B, reload that instead.)
-2. **Close the editor tab.** This step is the important one. From now on only the
-   View tab is running. So anything that happens to the waiting list was done by
-   the View tab.
-3. In the View tab, **reload the page**. Loading is exactly when the old version
-   emptied the list.
-4. **Wait 90 seconds.** Do nothing.
+*(Your card is safe. It is saved on your computer and will upload in C4.)*
 
 ☐ Done
 
-## C3 — Read the answer
+## C2 — Hand the browser over to the View tab only
+
+1. Click **View**. A new tab opens.
+2. **Close the editor tab.** Only the View tab is running now.
+3. In the View tab, **reload the page**.
+4. Paste **LINE P**. It must say `"thisTabIs": "viewer"`.
+
+☐ Done
+
+## C3 — Take the "before" numbers, in the View tab
 
 1. In the **View tab**, paste **LINE C**.
+2. Write both numbers down. **This is the baseline** — taken with only the View tab
+   alive.
 
-**What should happen:** `totalWaiting` and every `triesSoFar` are **exactly the
-numbers you wrote down in C1**. Nothing moved. That means the View tab never tried
-to upload.
+**`totalWaiting` = __________    `triesSoFar` = __________**
 
-If the numbers went up, the View tab did try to upload. That is the bug, and I want
-to know.
+☐ Done
+
+## C4 — Wait, then read the answer
+
+1. Still in the View tab, **wait 90 seconds**. Do nothing.
+2. Paste **LINE C** again.
+
+**What should happen:** both numbers are **exactly the same** as in C3. Nothing
+moved. That means the View tab never tried to upload.
+
+If `triesSoFar` went up, the View tab did try. That is the bug and I want to know.
 
 **`totalWaiting` now = __________    `triesSoFar` now = __________**
 
+3. Also paste **LINE P** and look at `writesItHasRefused`. If it mentions
+   `upload retry`, the View tab tried and was stopped — send me that too.
+
 ☐ PASS ☐ FAIL ☐ BLOCKED
 
-## C4 — Put it all back
+## C5 — Put it all back
 
 1. **Close the View tab.**
 2. Open the app again as normal (an editor tab). Paste:
    ```
    localStorage.removeItem('cm-debug-fail-cloud-write'); 'uploads work again'
    ```
-3. Wait for the chip to turn green **Saved**. Then wait about 25 seconds more.
-4. Paste **LINE C**. It should now say `queue empty`. The failed uploads have gone
-   through.
-5. Delete the card `FIX6 C1`. Delete `FIX6 A1` too if it is still there. Wait for
-   green.
-
-**What should happen:** the waiting list empties on its own, and your test cards
-are gone.
+3. Wait for the chip to turn green **Saved**, then about 25 seconds more.
+4. Paste **LINE C**. It should say `queue empty`.
+5. Delete the card `FIX6 C1`, and `FIX6 A1` if it is still there. Wait for green.
 
 ☐ PASS ☐ FAIL ☐ BLOCKED
 
@@ -395,7 +470,8 @@ In the View tab, check each one:
 
 # 6. Finish up
 
-1. **Close every View tab.**
+1. **Close every View tab.** From now on, keep to one tab at a time again until this
+   change is merged.
 2. In the editor tab, paste the **reset line** (section 4). Reload.
 3. Check all of these:
    - the chip is green
@@ -413,41 +489,42 @@ Write **INCONCLUSIVE** and tell me what you saw. Please do not guess a PASS.
 Group C matters most here. If you are not sure the editor tab was really closed,
 say so. A wrong PASS there would hide the one leak that reached your cloud.
 
-In the last two rounds, the mistakes were in **my** documents, not in the app. So
-"this step does not make sense" is useful. It is not a failure on your part.
+In all three rounds so far, the mistakes were in **my** documents, not in your app.
+Two of them you caught: a step that assumed a conversation you did not remember, and
+a measurement that could not tell two tabs apart. So "this step does not make sense"
+is useful information. It is not a failure on your part.
 
 ---
 
 # 8. What this test cannot prove
 
-I would rather list these than let the ticks look stronger than they are.
+1. **It cannot look inside your cloud.** Group C works out "no upload happened" from
+   the waiting numbers not moving. That is good evidence, because those numbers only
+   move when an upload is tried. Real proof would mean opening the Firebase console.
+2. **I could not test the upload leak myself.** With no working cloud, my sandbox app
+   goes into offline mode, where uploads are blocked for a different reason. So that
+   code never runs there, on either version. **Group C is the only real evidence, and
+   it is all yours.**
+3. **A View tab still writes the four browser settings in section 2.** On purpose.
+4. **Nothing here tests two devices at once.**
 
-1. **It cannot look inside your cloud.** Group C works out "no upload happened"
-   from the waiting list not moving. That is good evidence, because the list only
-   moves when an upload is tried. Real proof would mean opening the Firebase
-   console.
-2. **I could not test the upload leak at all myself.** With no working cloud, the
-   app goes into offline mode, where uploads are blocked for a different reason. So
-   that code never runs in my sandbox, on either version. **Group C is the only
-   real evidence, and it is all yours.**
-3. **The reminder-timer leak has nothing you can see.** Pop-ups were already hidden
-   in View tabs by other code, and what the timer changed was never saved. That fix
-   rests on the code change and on automated tests.
-4. **A View tab still changes the four browser settings in section 2.** On purpose.
-5. **Nothing here tests two devices at once.**
+**What I did test myself, this time round:**
 
-**What I did test myself.** I wrote one browser script and ran it twice: once
-against the app as it is now, once against this fix.
-
-| Check | App as it is now | With this fix |
-|---|---|---|
-| View tab switches canvas | **the saved copy of the canvas changed** | nothing was written |
-| Viewer adds a pin group | **the group appeared** | it does not appear |
-| Viewer clicks a reminder switch | **the switch moved** | nothing moves at all |
-| Editor tab does the same things | saves normally | saves normally — no change |
-
-That is what tells me the checks above can really spot the problem, instead of
-passing because they are looking in the wrong place.
+- **The gate, one writer at a time.** 39 automated tests call every single save the
+  app has — canvases, project settings, task list, the open-project pointer, sync
+  bookkeeping, the device name, all the cloud saves, version snapshots, manual sync
+  and the upload retry list — once as a viewer and once as an editor. As a viewer,
+  every one leaves storage untouched. As an editor, every one still saves. That
+  second half matters: a gate that blocked everybody would pass the first half and
+  break your app.
+- **The two writes that leaked in your test.** There are named tests for exactly
+  those: taking a cloud canvas into the local copy, and taking cloud project
+  settings. Both refused, and the local copy still holds what it held before.
+- **In a real browser.** A View tab loads, switches canvas, opens panels and sits for
+  45 seconds: **no stored data changes at all.** An editor tab doing the same canvas
+  switch still writes its canvas, its project settings and its last-place marker. And
+  LINE P correctly says `viewer` on a `#/view/` address and `editor` on `#/editor/`,
+  including when a tab changes from one to the other without reloading.
 
 ---
 
@@ -455,13 +532,13 @@ passing because they are looking in the wrong place.
 
 | The fix | Proven by |
 |---|---|
-| A View tab saves nothing when you switch canvas | B2 and B3, plus my before-and-after run |
-| A viewer cannot change pin groups | Test 0, B2, B3, plus my before-and-after run |
-| A viewer cannot change reminders | **My before-and-after run only** — kept out of your test on purpose |
+| A viewer cannot save anything, by any route | 39 automated tests, plus B4 in a real browser |
+| The writes that leaked in your last run | Named automated tests, plus B4 |
 | A View tab never uploads your editor's failed uploads | **Group C only** — see section 8.2 |
-| The reminder timer does not run in a View tab | Code and automated tests only — see section 8.3 |
-| The "is it safe to save?" rule itself | 24 automated tests |
-| The editor still works | A1, A2, A3 |
+| A viewer cannot change pin groups | Test 0 last round, B3 this round |
+| A viewer cannot change reminders | My browser run only — kept out of your test on purpose |
+| This tab knows what it is | LINE P, checked in a real browser both ways |
+| The editor still works | A1, A2, A3, plus the editor half of all 39 tests |
 | A View tab is still useful | D1, D2 |
 
 ---
@@ -511,7 +588,19 @@ agreed to keep them switched off anyway.
 
 # 11. Changes to this document
 
-- **v3** — rewritten again, much simpler, at your request.
+- **v4** — rebuilt after your Group B and Group C results.
+  - **Both of those FAILs were my test's fault, not your app's.** The lines look at
+    the whole browser, so they could not tell which tab wrote something — and I had
+    told you to keep the editor tab open. `cm-last-snapshot` in your output can only
+    come from an editor tab, which is how I know. Groups B and C now close the editor
+    tab first, so only one tab is ever running.
+  - **The fix itself was rebuilt too**, the way you described: one gate at the
+    boundary instead of forty checks scattered about. Section 2 explains it.
+  - **New LINE P** so you can ask a tab what it is, instead of guessing from what
+    changed.
+  - Group B now measures the View tab's **loading** as well, which is where the real
+    leak was.
+- **v3** — rewritten, much simpler, at your request.
   - **The reminder step (old A4) is gone.** You asked whether you had to switch all
     reminders off. The answer is no: you do not touch reminders at all now. I tested
     the reminder part myself in a browser instead — see the table in section 8.
