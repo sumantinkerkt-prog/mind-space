@@ -5334,6 +5334,17 @@ export default function WorkflowApp() {
   // for the existing manual "push my current work now" action, so it still goes
   // through cloudUploadAllowed(), the viewer boundary and the version/conflict
   // checks inside manualServerSync().
+  //
+  // BOTH shortcuts are editor-context only (`!isReferenceMode`), by explicit
+  // request. For Ctrl+Shift+D that simply matches its button, which is rendered
+  // inside `{!isReferenceMode && (...)}`. For Ctrl+Shift+E this is deliberately
+  // STRICTER than its button: the Export button IS still shown in read-only
+  // reference tabs (exporting only reads, so viewers may click it) and that has
+  // NOT changed - only the keyboard accelerator is withheld there, which keeps a
+  // reference tab's key map to the reader shortcuts it already had (Shift+D, F,
+  // Escape). Please do not "fix" this back to match the button: the divergence
+  // is the requirement. The Export button's tooltip is conditional for the same
+  // reason, so it never advertises a shortcut that will not fire.
   useEffect(() => {
     const handleQuickActionKey = (e) => {
       // Never steal keys while the user is typing.
@@ -5344,28 +5355,32 @@ export default function WorkflowApp() {
       // both of which bail out when ctrlKey is set.
       if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey) return;
       // Only while the real UI (and therefore the real button) is on screen.
+      // Deliberately BEFORE preventDefault: on the load-failure screen the app
+      // owns no accelerators, so the browser should keep its own.
       if (!shortcutsReachableRef.current) return;
       // e.key is already case-normalised by Shift, so compare case-insensitively.
       const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+      if (key !== 'e' && key !== 'd') return;
+
+      // Claim the chord as soon as we recognise it as ours, BEFORE the
+      // availability checks below. Otherwise a shortcut we decline (mid-sync,
+      // cloud not configured, reference tab) falls through to the browser, and
+      // someone pressing Ctrl+Shift+D again during a sync gets Chrome's
+      // "bookmark all tabs" dialog instead of the nothing they expected.
+      e.preventDefault();
+
+      // Editor context only - both shortcuts. See the note above this effect.
+      if (isReferenceMode) return;
 
       if (key === 'e') {
-        // Export is read-only, so it is available wherever the Export button is
-        // (that button is intentionally rendered in reference tabs too).
-        e.preventDefault();
         exportDataRef.current?.();
         return;
       }
 
-      if (key === 'd') {
-        // Sync writes, so it is editor-context only - exactly like its button,
-        // which lives inside `{!isReferenceMode && (...)}`.
-        if (isReferenceMode) return;
-        // Mirror the button's disabled condition so the shortcut cannot start a
-        // second sync while one is already in flight.
-        if (syncStatusRef.current === 'syncing' || !isFirebaseConfigured()) return;
-        e.preventDefault();
-        manualServerSyncRef.current?.();
-      }
+      // key === 'd': mirror the button's own disabled condition so the shortcut
+      // cannot start a second sync while one is already in flight.
+      if (syncStatusRef.current === 'syncing' || !isFirebaseConfigured()) return;
+      manualServerSyncRef.current?.();
     };
     window.addEventListener('keydown', handleQuickActionKey);
     return () => window.removeEventListener('keydown', handleQuickActionKey);
@@ -8273,7 +8288,10 @@ export default function WorkflowApp() {
                       <Upload className="w-4 h-4 mr-1.5" /> Import
                     </button>
                   )}
-                  <button onClick={exportData} className="flex-1 flex items-center justify-center px-3 py-2 hover:bg-slate-100 text-slate-600 text-sm font-medium rounded-lg border border-slate-200 transition-colors" title="Export Map JSON (Ctrl+Shift+E)">
+                  {/* Export stays available to read-only reference tabs (it only
+                      reads), but the Ctrl+Shift+E accelerator is editor-only, so
+                      the tooltip must not promise it here. */}
+                  <button onClick={exportData} className="flex-1 flex items-center justify-center px-3 py-2 hover:bg-slate-100 text-slate-600 text-sm font-medium rounded-lg border border-slate-200 transition-colors" title={isReferenceMode ? 'Export Map JSON' : 'Export Map JSON (Ctrl+Shift+E)'}>
                     <Download className="w-4 h-4 mr-1.5" /> Export
                   </button>
                 </div>
