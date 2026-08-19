@@ -984,3 +984,21 @@ and its badge reads "View". 211 tests, clean build.
 
 Independent of Fix 6 and touches different regions of App.jsx, so the two merge
 cleanly in either order (verified with a test merge).
+
+
+### Owner sign-off (PR #10, Preview retired): 8 of 8 PASS
+
+Tested on the merged branch, so this run also re-confirmed Fix 6 after the two changes
+were combined:
+
+- A1 — the Preview button and the right-toolbar eye icon are both gone; View remains.
+- A2, A4 — editing, saving and canvas-switch saving all unaffected.
+- A3 — the Full Edit / Arrange switch still works by **M** key and by button. This
+  mattered because the removed Preview button sat next to it and had disabled it.
+- B1 — the canvas badge in a `/view/` tab now reads **View**. It used to read
+  "Preview", which was the exact confusion the change existed to remove.
+- B2 — `window.mindspace.probe()` still reports `viewer` / `willRefuseAllWrites: true`,
+  and the tab still refuses edits, with no Import / Partial / Sync controls.
+- B3 — reading, panning, Shift+D and Ctrl+C all still work.
+
+Merged. **All six fixes plus 5b and the Preview removal are now on `main`.**
