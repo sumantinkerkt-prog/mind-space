@@ -558,6 +558,9 @@ export default function WorkflowApp() {
   // during node drags.
   const exportDataRef = useRef(null);
   const manualServerSyncRef = useRef(null);
+  // Whether the app is showing its normal, data-trustworthy UI - i.e. whether
+  // these actions' buttons exist at all. Set during render below.
+  const shortcutsReachableRef = useRef(false);
 
   // Ref to track activeTab without causing useCallback identity changes
   const activeTabRef = useRef(activeTab);
@@ -5310,6 +5313,19 @@ export default function WorkflowApp() {
   exportDataRef.current = exportData;
   manualServerSyncRef.current = handleManualServerSync;
 
+  // A keyboard shortcut outlives the UI: this component early-returns `null`
+  // until `initialized && activeWs` (and returns the Bug 42 load-failure screen
+  // when the outcome is INDETERMINATE), so in those states there is no Export
+  // button to click - but a keydown listener registered in an effect is still
+  // live. Without this parity check Ctrl+Shift+E would happily serialise the
+  // still-empty `workspaces` array and hand the user a `Project_....json` full
+  // of nothing, letting them believe they had taken a backup at the exact
+  // moment we know we could not read their data. That false confidence is the
+  // failure mode the whole load-outcome layer exists to prevent, so the
+  // accelerator must be reachable only when its button is.
+  shortcutsReachableRef.current =
+    initialized && !!activeWs && !(shouldBlockEditing(loadOutcome) && loadNotice);
+
   // --- Ctrl+Shift+E = Export / Take Backup, Ctrl+Shift+D = Sync to Server ---
   // These are ONLY accelerators for the two existing sidebar buttons: they call
   // the exact same handlers (exportData / handleManualServerSync) and add no
@@ -5327,6 +5343,8 @@ export default function WorkflowApp() {
       // (card editor) and reference-mode "Shift+D" (descriptions) shortcuts,
       // both of which bail out when ctrlKey is set.
       if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey) return;
+      // Only while the real UI (and therefore the real button) is on screen.
+      if (!shortcutsReachableRef.current) return;
       // e.key is already case-normalised by Shift, so compare case-insensitively.
       const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
 
