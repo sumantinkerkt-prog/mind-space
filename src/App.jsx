@@ -549,10 +549,28 @@ export default function WorkflowApp() {
   const animTimerRef = useRef(null);
   const toggleEditingStateRef = useRef(null);
   const pasteOffsetRef = useRef(0);
+  // Keyboard accelerators for Export / Sync to Server. These are held in refs
+  // (the same pattern as toggleEditingStateRef/addNodeRef) so the one-time
+  // window keydown listener always calls the CURRENT handler. exportData is a
+  // plain function re-created every render and closes over workspaces/tasks, so
+  // capturing it once would export stale data; putting it in the effect's deps
+  // instead would re-register a window listener on every render, which is hot
+  // during node drags.
+  const exportDataRef = useRef(null);
+  const manualServerSyncRef = useRef(null);
+  // Whether the app is showing its normal, data-trustworthy UI - i.e. whether
+  // these actions' buttons exist at all. Set during render below.
+  const shortcutsReachableRef = useRef(false);
 
   // Ref to track activeTab without causing useCallback identity changes
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
+
+  // Ref to track syncStatus so the Ctrl+Shift+D accelerator can mirror the Sync
+  // to Server button's own `disabled` condition without re-registering its
+  // listener on every status change.
+  const syncStatusRef = useRef(syncStatus);
+  syncStatusRef.current = syncStatus;
 
   // --- Debounced SERVER savers (3s debounce, 30s maximum-wait ceiling) ---
   // The 30s ceiling guarantees the cloud is never more than ~30s behind, even
@@ -5291,6 +5309,83 @@ export default function WorkflowApp() {
     URL.revokeObjectURL(url);
   };
 
+  // Keep the accelerators pointed at the live handlers (see exportDataRef above).
+  exportDataRef.current = exportData;
+  manualServerSyncRef.current = handleManualServerSync;
+
+  // A keyboard shortcut outlives the UI: this component early-returns `null`
+  // until `initialized && activeWs` (and returns the Bug 42 load-failure screen
+  // when the outcome is INDETERMINATE), so in those states there is no Export
+  // button to click - but a keydown listener registered in an effect is still
+  // live. Without this parity check Ctrl+Shift+E would happily serialise the
+  // still-empty `workspaces` array and hand the user a `Project_....json` full
+  // of nothing, letting them believe they had taken a backup at the exact
+  // moment we know we could not read their data. That false confidence is the
+  // failure mode the whole load-outcome layer exists to prevent, so the
+  // accelerator must be reachable only when its button is.
+  shortcutsReachableRef.current =
+    initialized && !!activeWs && !(shouldBlockEditing(loadOutcome) && loadNotice);
+
+  // --- Ctrl+Shift+E = Export / Take Backup, Ctrl+Shift+D = Sync to Server ---
+  // These are ONLY accelerators for the two existing sidebar buttons: they call
+  // the exact same handlers (exportData / handleManualServerSync) and add no
+  // logic of their own. In particular Ctrl+Shift+D changes nothing about sync
+  // behaviour - automatic sync stays on, and this is simply a faster way to ask
+  // for the existing manual "push my current work now" action, so it still goes
+  // through cloudUploadAllowed(), the viewer boundary and the version/conflict
+  // checks inside manualServerSync().
+  //
+  // BOTH shortcuts are editor-context only (`!isReferenceMode`), by explicit
+  // request. For Ctrl+Shift+D that simply matches its button, which is rendered
+  // inside `{!isReferenceMode && (...)}`. For Ctrl+Shift+E this is deliberately
+  // STRICTER than its button: the Export button IS still shown in read-only
+  // reference tabs (exporting only reads, so viewers may click it) and that has
+  // NOT changed - only the keyboard accelerator is withheld there, which keeps a
+  // reference tab's key map to the reader shortcuts it already had (Shift+D, F,
+  // Escape). Please do not "fix" this back to match the button: the divergence
+  // is the requirement. The Export button's tooltip is conditional for the same
+  // reason, so it never advertises a shortcut that will not fire.
+  useEffect(() => {
+    const handleQuickActionKey = (e) => {
+      // Never steal keys while the user is typing.
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
+      // Require exactly Ctrl (or Cmd on macOS) + Shift. Rejecting Alt keeps us
+      // clear of Alt+Shift+X, and requiring Ctrl keeps us clear of the bare "E"
+      // (card editor) and reference-mode "Shift+D" (descriptions) shortcuts,
+      // both of which bail out when ctrlKey is set.
+      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey) return;
+      // Only while the real UI (and therefore the real button) is on screen.
+      // Deliberately BEFORE preventDefault: on the load-failure screen the app
+      // owns no accelerators, so the browser should keep its own.
+      if (!shortcutsReachableRef.current) return;
+      // e.key is already case-normalised by Shift, so compare case-insensitively.
+      const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+      if (key !== 'e' && key !== 'd') return;
+
+      // Claim the chord as soon as we recognise it as ours, BEFORE the
+      // availability checks below. Otherwise a shortcut we decline (mid-sync,
+      // cloud not configured, reference tab) falls through to the browser, and
+      // someone pressing Ctrl+Shift+D again during a sync gets Chrome's
+      // "bookmark all tabs" dialog instead of the nothing they expected.
+      e.preventDefault();
+
+      // Editor context only - both shortcuts. See the note above this effect.
+      if (isReferenceMode) return;
+
+      if (key === 'e') {
+        exportDataRef.current?.();
+        return;
+      }
+
+      // key === 'd': mirror the button's own disabled condition so the shortcut
+      // cannot start a second sync while one is already in flight.
+      if (syncStatusRef.current === 'syncing' || !isFirebaseConfigured()) return;
+      manualServerSyncRef.current?.();
+    };
+    window.addEventListener('keydown', handleQuickActionKey);
+    return () => window.removeEventListener('keydown', handleQuickActionKey);
+  }, [isReferenceMode]);
+
   const exportSelectedNodes = (nodeIds) => {
     if (!nodeIds || nodeIds.length === 0) return;
 
@@ -8193,7 +8288,10 @@ export default function WorkflowApp() {
                       <Upload className="w-4 h-4 mr-1.5" /> Import
                     </button>
                   )}
-                  <button onClick={exportData} className="flex-1 flex items-center justify-center px-3 py-2 hover:bg-slate-100 text-slate-600 text-sm font-medium rounded-lg border border-slate-200 transition-colors" title="Export Map JSON">
+                  {/* Export stays available to read-only reference tabs (it only
+                      reads), but the Ctrl+Shift+E accelerator is editor-only, so
+                      the tooltip must not promise it here. */}
+                  <button onClick={exportData} className="flex-1 flex items-center justify-center px-3 py-2 hover:bg-slate-100 text-slate-600 text-sm font-medium rounded-lg border border-slate-200 transition-colors" title={isReferenceMode ? 'Export Map JSON' : 'Export Map JSON (Ctrl+Shift+E)'}>
                     <Download className="w-4 h-4 mr-1.5" /> Export
                   </button>
                 </div>
@@ -8215,7 +8313,7 @@ export default function WorkflowApp() {
                         ? 'bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed'
                         : 'hover:bg-green-50 border-slate-200 text-slate-600 hover:text-green-700 hover:border-green-300'
                   }`}
-                  title={!isFirebaseConfigured() ? 'Cloud sync not configured' : 'Manually sync all data to server'}
+                  title={!isFirebaseConfigured() ? 'Cloud sync not configured' : 'Manually sync all data to server (Ctrl+Shift+D)'}
                 >
                   {syncStatus === 'syncing' ? <Loader className="w-4 h-4 animate-spin" /> : <Cloud className="w-4 h-4" />}
                   {syncStatus === 'syncing' ? 'Syncing...' : 'Sync to Server'}
