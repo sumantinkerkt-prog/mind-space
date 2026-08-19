@@ -1,5 +1,6 @@
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { storage, isFirebaseConfigured } from './firebase';
+import { sessionIsViewer } from './persistenceService';
 
 /**
  * Upload an image file to Firebase Storage and return the download URL.
@@ -10,6 +11,8 @@ import { storage, isFirebaseConfigured } from './firebase';
  * @returns {Promise<string|null>} The download URL, or null on failure.
  */
 export async function uploadImage(file, projectId, workspaceId, imageId) {
+  // Fix 6: a View tab never uploads. See the viewer boundary in persistenceService.js.
+  if (sessionIsViewer()) return null;
   if (!isFirebaseConfigured() || !storage) {
     console.warn('[ImageStorage] Firebase not configured, skipping upload.');
     return null;
@@ -33,6 +36,7 @@ export async function uploadImage(file, projectId, workspaceId, imageId) {
  * @param {string} imageId - The unique image ID.
  */
 export async function deleteImage(projectId, workspaceId, imageId) {
+  if (sessionIsViewer()) return false;
   if (!isFirebaseConfigured() || !storage) {
     return;
   }
@@ -52,6 +56,7 @@ export async function deleteImage(projectId, workspaceId, imageId) {
  * @param {string[]} imageIds - Array of image IDs to delete.
  */
 export async function deleteWorkspaceImages(projectId, workspaceId, imageIds) {
+  if (sessionIsViewer()) return;
   if (!isFirebaseConfigured() || !storage || !imageIds || imageIds.length === 0) {
     return;
   }
