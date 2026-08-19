@@ -386,7 +386,20 @@ it back into line.
 
 ---
 
-# 7. Changes to this document
+# 7. Owner sign-off
+
+**Result: 17 of 17 PASS.** Signed off by the owner on 19 August 2026, covering all
+six groups — the shortcuts firing (A), typing never being interrupted (B), every
+pre-existing shortcut still working (C), the View tab having the keys off while the
+Export button stays on (D), sync re-entrancy and automatic sync being untouched (E),
+and no Chrome bookmark dialog (F).
+
+Merged to `main` on that basis.
+
+---
+
+# 8. Changes to this document
 
 - **v1** — written after you asked for both shortcuts to be editor-only, and for a
   declined shortcut not to leak through to the browser.
+- **v2** — owner sign-off recorded: 17 of 17 PASS.
