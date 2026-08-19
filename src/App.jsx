@@ -41,6 +41,8 @@ import {
   describeLoadOutcome,
   summarizeReadFailures,
 } from './loadOutcome';
+import { SESSION_MODE, sessionMayPersist, sessionMayUploadToCloud } from './writeGate';
+import { SESSION_ROLE } from './sessionRole';
 import { uploadImage as uploadImageToStorage, deleteImage as deleteImageFromStorage, deleteWorkspaceImages } from './imageStorageService';
 import {
   saveProjectMeta,
@@ -106,7 +108,8 @@ import {
   maybeSnapshot,
   createSnapshot,
   listSnapshots,
-  loadSnapshot
+  loadSnapshot,
+  setSessionRole,
 } from './persistenceService';
 
 // --- Premium Color Themes (10 colors) ---
@@ -598,23 +601,49 @@ export default function WorkflowApp() {
   const [loadFailureSummary, setLoadFailureSummary] = useState([]);
 
   /**
+   * The route mode, held in a ref (Fix 6).
+   *
+   * Assigned on every render, so the gates below always read the CURRENT mode.
+   * A ref rather than the boolean itself because the mode can change WITHOUT a
+   * remount - the editor session timer redirects an editor tab to `/view/...`
+   * while the app stays mounted - and several write paths live in
+   * `useCallback(..., [])` closures that would otherwise keep reading the mode as
+   * it was on first render. `editorSessionTimerBlockedRef` below uses the same
+   * pattern.
+   */
+  const routeModeRef = useRef('editor');
+  routeModeRef.current = isReferenceMode ? SESSION_MODE.REFERENCE : SESSION_MODE.EDITOR;
+
+  // Tell the persistence layer what this tab is, on every render, so it follows the
+  // same source of truth as the router - including the editor-session timer, which
+  // turns an editor tab into a viewer tab without a reload. persistenceService can
+  // work this out from the URL by itself; this makes it explicit rather than sniffed.
+  setSessionRole(isReferenceMode ? SESSION_ROLE.VIEWER : SESSION_ROLE.EDITOR);
+
+  /**
    * THE write gate. Every path that persists anything - localStorage, Firestore,
    * autosave, manual sync, flush-on-close - must pass through this.
    *
    * Returns false after an indeterminate load (we do not know what the user has)
    * and after a partial load (we hold an incomplete copy, and saving a subset is
    * how you delete the rest).
+   *
+   * Fix 6 (Bug 47): it now also returns false in a `/view/` reference tab. That
+   * used to be enforced only by scattered `if (isPreviewMode) return;` lines in
+   * individual effects, so any path that forgot the convention wrote from a
+   * read-only tab - which is precisely how Bug 47's four leaks arose. The rules
+   * are a pure function in src/writeGate.js with the full truth table under test.
    */
-  const writesAllowed = () => mayPersist(loadOutcomeRef.current);
+  const writesAllowed = () => sessionMayPersist({ mode: routeModeRef.current, outcome: loadOutcomeRef.current });
 
   /**
    * Stricter gate for anything that pushes to the CLOUD. In local-only mode
    * (cloud unreachable, complete local copy) local saving is allowed but
    * uploading is not: this session never learned what the cloud holds, so an
    * upload would overwrite it blind. Those edits stay marked dirty and go up
-   * after the next healthy load.
+   * after the next healthy load. Also false in a reference tab (Fix 6).
    */
-  const cloudUploadAllowed = () => mayUploadToCloud(loadOutcomeRef.current);
+  const cloudUploadAllowed = () => sessionMayUploadToCloud({ mode: routeModeRef.current, outcome: loadOutcomeRef.current });
   // Ref to track activeProjectId without stale closures in debounced callbacks
   const activeProjectIdRef = useRef(null);
 
@@ -1650,7 +1679,10 @@ export default function WorkflowApp() {
         // Reference tabs never touch the dirty flag: an editor tab (here or on
         // another device) owns recovery, so a read-only viewer must not clear it.
         localStorage.removeItem('cm-dirty-flag');
-      } else if (dirtyFlag && !writesAllowed()) {
+      } else if (dirtyFlag && !isReferenceMode && !writesAllowed()) {
+        // Fix 6: `!isReferenceMode` keeps this diagnosis accurate. writesAllowed()
+        // is now false in a reference tab too, and there the reason is the tab's
+        // read-only role, not an untrustworthy load.
         console.warn('[Load] Unsynced edits from a previous session are still pending, but this load was not trustworthy. Leaving the dirty flag set for a later healthy session.');
       }
       setInitialized(true);
@@ -2058,6 +2090,10 @@ export default function WorkflowApp() {
   // Save a losing copy so a conflict resolution can NEVER lose data. Phase 3
   // will surface these in a history UI; for now they live in localStorage.
   const saveConflictBackup = useCallback((conflict) => {
+    // Fix 6: a viewer never writes, not even a backup. It cannot raise a
+    // conflict in the first place (it does no freshness check and no upload),
+    // so this is belt and braces on a shared localStorage key.
+    if (isReferenceMode) return;
     try {
       const key = 'cm-conflict-backups';
       const list = JSON.parse(localStorage.getItem(key) || '[]');
@@ -2071,7 +2107,7 @@ export default function WorkflowApp() {
       while (list.length > 30) list.shift();
       localStorage.setItem(key, JSON.stringify(list));
     } catch { /* ignore */ }
-  }, []);
+  }, [isReferenceMode]);
 
   // Resolve a per-document conflict. Both copies always survive (the loser is
   // backed up first). 'cloud' keeps the server version; 'mine' overwrites cloud.
@@ -2131,12 +2167,18 @@ export default function WorkflowApp() {
   // --- Retry Queue: process on init and on 'online' event ---
   useEffect(() => {
     if (!initialized) return;
+    // Fix 6 (Bug 47), leak 2: this was the worst of the four. A reference tab
+    // reached here on load and on every `online` event and drained THIS BROWSER'S
+    // queue of failed writes straight into the cloud - writes that belong to the
+    // editor tab, uploaded by a tab whose entire purpose is to touch nothing.
+    // Explicit as well as covered by cloudUploadAllowed() below, because this one
+    // is worth naming at the call site.
+    if (isReferenceMode) return;
     // Bug 42: the retry queue drains INTO THE CLOUD, so it needs the upload gate,
     // not the local one. After an untrustworthy load we do not know whether a
     // queued write is still correct, and in local-only mode we have not read the
     // cloud at all - either way the queue waits. It survives in localStorage and
     // a later healthy session drains it.
-    // (Reference-mode gating for this same function belongs to Fix 6.)
     if (!cloudUploadAllowed()) return;
     // Process any queued failed writes after successful init
     processRetryQueue();
@@ -2148,7 +2190,7 @@ export default function WorkflowApp() {
     };
     window.addEventListener('online', handleOnline);
     return () => window.removeEventListener('online', handleOnline);
-  }, [initialized]);
+  }, [initialized, isReferenceMode]);
 
   // --- Timer Countdown Effect ---
   useEffect(() => {
@@ -4001,6 +4043,15 @@ export default function WorkflowApp() {
   // --- Reminder Scheduling Engine ---
   useEffect(() => {
     if (!initialized) return;
+    // Fix 6 (Bug 47), leak 1: a reference tab must not run the scheduler. Its
+    // 60-second tick mutates project state (`lastShownAt` / `nextReminderAt` on
+    // every reminder that fires), which is a project-metadata change - and it
+    // fires reminder pop-ups at whoever is only meant to be LOOKING at the
+    // canvas. The metadata write itself is blocked downstream by the autosave
+    // guard, so the practical effect today is pop-ups plus in-memory state
+    // drifting away from what is stored; blocking it here removes the leak at
+    // source instead of relying on a guard three effects away.
+    if (isReferenceMode) return;
 
     // Initialize nextReminderAt for reminders that don't have it
     setReminders(prev => prev.map(r => {
@@ -4074,7 +4125,7 @@ export default function WorkflowApp() {
     }, 60000);
 
     return () => { if (reminderCheckIntervalRef.current) clearInterval(reminderCheckIntervalRef.current); };
-  }, [initialized, sessionStartTime]);
+  }, [initialized, sessionStartTime, isReferenceMode]);
 
   // --- Reminder Notification Queue Consumer & Auto-Dismiss ---
   // Presentation tuning. A new reminder slides in every STAGGER_MS; each one
@@ -5183,7 +5234,15 @@ export default function WorkflowApp() {
     // Bug 42: switching canvases must stay possible after a partial load (the
     // user needs to look around and copy things out) but must not save or flush.
     // Skip straight to the switch.
-    if (!writesAllowed()) {
+    //
+    // Fix 6 (Bug 47), leak 3: the same is true, for a different reason, in a
+    // reference tab. Looking at another canvas is the whole point of a `/view/`
+    // tab, so this must NOT become an early `return` - the switch still has to
+    // happen. What must not happen is the two writes below: saving the canvas
+    // being left back to localStorage, and flushing pending cloud writes.
+    // `isReferenceMode` is now folded into writesAllowed(), and is named here as
+    // well so the reason is visible at the call site.
+    if (isReferenceMode || !writesAllowed()) {
       setActiveTab(targetWorkspaceId);
       return;
     }
@@ -5220,7 +5279,7 @@ export default function WorkflowApp() {
 
     // 3. Switch to target workspace
     setActiveTab(targetWorkspaceId);
-  }, [workspaces, activeProjectId]);
+  }, [workspaces, activeProjectId, isReferenceMode]);
 
   // --- Manual Server Sync Handler ---
   const handleManualServerSync = useCallback(async () => {
@@ -6334,6 +6393,32 @@ export default function WorkflowApp() {
 
   const addPinRef = useRef(addPin);
   useEffect(() => { addPinRef.current = addPin; });
+
+  /**
+   * Fix 6 (Bug 47), leak 4: guarded versions of the two RAW state setters that
+   * were handed straight to PinPanel and ReminderPanel.
+   *
+   * `setPinGroups` and `setReminders` are project data - they live in the project
+   * metadata document alongside `nextId`. Passing the bare setters meant a viewer
+   * in a `/view/` tab could add, rename, recolour, delete and reorder pin groups,
+   * and add, edit, delete, enable-all or disable-all reminders. The autosave
+   * effect refused to persist any of it (`isPreviewMode`), so nothing reached
+   * storage - but that is a guard three effects away from the action, and it made
+   * the panels lie: the viewer's changes appeared to work and then vanished on
+   * reload.
+   *
+   * Refusing at the setter keeps the data safe wherever the call comes from, and
+   * makes the panels visibly inert instead of quietly discarding work.
+   */
+  const setPinGroupsIfEditable = useCallback((next) => {
+    if (isReferenceMode) return;
+    setPinGroups(next);
+  }, [isReferenceMode]);
+
+  const setRemindersIfEditable = useCallback((next) => {
+    if (isReferenceMode) return;
+    setReminders(next);
+  }, [isReferenceMode]);
 
   const updatePin = (pinId, updates, workspaceId) => {
     if (isPreviewMode) return;
@@ -9619,7 +9704,7 @@ export default function WorkflowApp() {
             onClose={() => setShowPinPanel(false)}
             tasks={tasks}
             pinGroups={pinGroups}
-            onUpdatePinGroups={setPinGroups}
+            onUpdatePinGroups={setPinGroupsIfEditable}
             panelWidthPct={panelWidthPct}
             onSetPanelWidth={setPanelWidthPct}
             isPreviewMode={isPreviewMode}
@@ -9633,11 +9718,11 @@ export default function WorkflowApp() {
             reminders={reminders}
             showPanel={true}
             onClose={() => setShowReminderPanel(false)}
-            onAddReminder={(reminder) => { setReminders(prev => [...prev, { ...reminder, id: `r-${Date.now()}`, createdAt: Date.now(), lastShownAt: null, nextReminderAt: reminder.enabled ? Date.now() + reminder.frequency * 60000 : null }]); }}
-            onUpdateReminder={(id, updates) => { setReminders(prev => prev.map(r => r.id === id ? { ...r, ...updates, nextReminderAt: updates.enabled === false ? null : (updates.frequency && updates.frequency !== r.frequency ? Date.now() + updates.frequency * 60000 : r.nextReminderAt) } : r)); }}
-            onDeleteReminder={(id) => { setReminders(prev => prev.filter(r => r.id !== id)); }}
-            onToggleReminder={(id) => { setReminders(prev => prev.map(r => r.id === id ? { ...r, enabled: !r.enabled, nextReminderAt: !r.enabled ? Date.now() + r.frequency * 60000 : null } : r)); }}
-            onImportReminders={(imported) => { setReminders(prev => [...prev, ...imported.map(r => ({ ...r, id: `r-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, lastShownAt: null, nextReminderAt: r.enabled ? Date.now() + r.frequency * 60000 : null }))]); }}
+            onAddReminder={(reminder) => { setRemindersIfEditable(prev => [...prev, { ...reminder, id: `r-${Date.now()}`, createdAt: Date.now(), lastShownAt: null, nextReminderAt: reminder.enabled ? Date.now() + reminder.frequency * 60000 : null }]); }}
+            onUpdateReminder={(id, updates) => { setRemindersIfEditable(prev => prev.map(r => r.id === id ? { ...r, ...updates, nextReminderAt: updates.enabled === false ? null : (updates.frequency && updates.frequency !== r.frequency ? Date.now() + updates.frequency * 60000 : r.nextReminderAt) } : r)); }}
+            onDeleteReminder={(id) => { setRemindersIfEditable(prev => prev.filter(r => r.id !== id)); }}
+            onToggleReminder={(id) => { setRemindersIfEditable(prev => prev.map(r => r.id === id ? { ...r, enabled: !r.enabled, nextReminderAt: !r.enabled ? Date.now() + r.frequency * 60000 : null } : r)); }}
+            onImportReminders={(imported) => { setRemindersIfEditable(prev => [...prev, ...imported.map(r => ({ ...r, id: `r-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, lastShownAt: null, nextReminderAt: r.enabled ? Date.now() + r.frequency * 60000 : null }))]); }}
             onExportReminders={() => {
               const exportData = { type: 'thoughtflow-reminder-collection', version: 1, name: 'My Reminders', reminders: reminders, createdAt: new Date().toISOString(), exportedAt: new Date().toISOString() };
               const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
@@ -9650,8 +9735,8 @@ export default function WorkflowApp() {
               document.body.removeChild(a);
               setTimeout(() => URL.revokeObjectURL(url), 1000);
             }}
-            onEnableAll={() => { setReminders(prev => prev.map(r => ({ ...r, enabled: true, nextReminderAt: Date.now() + r.frequency * 60000 }))); }}
-            onDisableAll={() => { setReminders(prev => prev.map(r => ({ ...r, enabled: false, nextReminderAt: null }))); }}
+            onEnableAll={() => { setRemindersIfEditable(prev => prev.map(r => ({ ...r, enabled: true, nextReminderAt: Date.now() + r.frequency * 60000 }))); }}
+            onDisableAll={() => { setRemindersIfEditable(prev => prev.map(r => ({ ...r, enabled: false, nextReminderAt: null }))); }}
             panelWidthPct={panelWidthPct}
             onSetPanelWidth={setPanelWidthPct}
             isPreviewMode={isPreviewMode}

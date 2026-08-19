@@ -14,6 +14,97 @@ import { nextDirtySeq, shouldClearDirty, createWriteCoalescer } from './saveAck'
 import {
   retryKey, normaliseQueue, mergeQueueEntry, planRetry, applyRetryOutcome, removeQueueEntry,
 } from './retryQueue';
+import { SESSION_ROLE, roleFromLocation } from './sessionRole';
+
+// =============================================================================
+// THE VIEWER BOUNDARY (Fix 6, second attempt - the owner's model)
+// =============================================================================
+// EDITOR <-> SERVER: read and write.
+// VIEWER  <- SERVER: read only, one way. Load a copy and disconnect.
+//
+// Every write in this app goes through this module. So this is where a viewer is
+// stopped - once, at the boundary - instead of at the forty-odd call sites in
+// App.jsx that each had to remember. The first attempt at Fix 6 guarded the call
+// sites and still missed the load sequence, which writes the local cache and the
+// sync bookkeeping from about a dozen places.
+//
+// Reads are untouched: a viewer must still be able to load and look at everything.
+//
+// This covers localStorage as well as Firestore, deliberately. localStorage here is
+// not a private scratchpad - an editor tab on the same device reads the same keys
+// and uploads them, so a "local only" write by a viewer can still reach the server
+// later, through the editor. In-memory experiments (panning, zooming, hiding
+// descriptions, copying a card) are genuinely private and stay allowed.
+// =============================================================================
+
+/** Explicit role, set by App.jsx from the router. Null = work it out from the URL. */
+let _sessionRoleOverride = null;
+
+/**
+ * Tell the persistence layer what this tab is. App.jsx calls this from the router,
+ * so the answer follows the same source of truth as the rest of the app - including
+ * the editor-session timer, which turns an editor tab into a viewer tab mid-session
+ * without a reload.
+ * @param {string} role a SESSION_ROLE value
+ */
+export function setSessionRole(role) {
+  _sessionRoleOverride = (role === SESSION_ROLE.VIEWER || role === SESSION_ROLE.EDITOR) ? role : null;
+}
+
+/** True when this tab is a read-only viewer. */
+export function sessionIsViewer() {
+  if (_sessionRoleOverride) return _sessionRoleOverride === SESSION_ROLE.VIEWER;
+  return roleFromLocation(typeof location !== 'undefined' ? location : null) === SESSION_ROLE.VIEWER;
+}
+
+/** Names already reported, so the console gets one line per kind, not thousands. */
+const _refusedWrites = new Set();
+
+/**
+ * The gate. Returns true when the caller must NOT write.
+ *
+ * Logs the first refusal of each kind. That is on purpose: if a viewer tab is
+ * quietly refusing writes all day, the console should say so once, so a future
+ * "why did my change not save?" has an answer sitting right there.
+ *
+ * @param {string} what short label, e.g. 'workspace' or 'firestore:project'
+ * @returns {boolean}
+ */
+function viewerMustNotWrite(what) {
+  if (!sessionIsViewer()) return false;
+  if (!_refusedWrites.has(what)) {
+    _refusedWrites.add(what);
+    console.info('[Persistence] This tab is a read-only View tab, so it did not write "%s". Reload an editor tab to make changes.', what);
+  }
+  return true;
+}
+
+/** Diagnostics: what this tab has refused to write (used by the manual test). */
+export function refusedWriteKinds() {
+  return Array.from(_refusedWrites);
+}
+
+// A read-only diagnostic, deliberately available in production.
+//
+// Unit tests can prove that every writer is guarded, but they cannot prove that a
+// REAL browser tab on a `/view/` URL is recognised as a viewer - that depends on the
+// live URL. This lets the owner ask the running tab directly, instead of inferring
+// it from what did or did not change in storage. It exposes no way to write
+// anything: `probe()` asks the gate a question and throws the answer away.
+if (typeof window !== 'undefined') {
+  window.mindspace = {
+    /** 'viewer' (read-only tab) or 'editor'. */
+    role: () => (sessionIsViewer() ? SESSION_ROLE.VIEWER : SESSION_ROLE.EDITOR),
+    /** Kinds of write this tab has refused so far. */
+    refused: () => refusedWriteKinds(),
+    /** Ask the boundary whether a write would be allowed right now. Writes nothing. */
+    probe: () => ({
+      role: sessionIsViewer() ? SESSION_ROLE.VIEWER : SESSION_ROLE.EDITOR,
+      wouldBlockWrites: sessionIsViewer(),
+      refusedSoFar: refusedWriteKinds(),
+    }),
+  };
+}
 
 // =============================================================================
 // READ-FAILURE REGISTRY (Bug 42)
@@ -275,6 +366,7 @@ export function getDeviceIdentity() {
 
 /** Set (or change) the friendly device name, preserving the hidden id. */
 export function setDeviceName(name) {
+  if (viewerMustNotWrite('device name')) return;
   const current = getDeviceIdentity();
   const next = { id: current.id, name: name || null };
   try { localStorage.setItem(KEY_DEVICE, JSON.stringify(next)); } catch { /* ignore */ }
@@ -358,6 +450,8 @@ function loadSyncStateMap() {
 }
 
 function saveSyncStateMap(map) {
+  // Covers markDirty, seedSyncState, confirmSynced and rebaseDirty in one place.
+  if (viewerMustNotWrite('sync bookkeeping')) return;
   try { localStorage.setItem(KEY_SYNC_STATE, JSON.stringify(map)); } catch { /* ignore */ }
 }
 
@@ -511,6 +605,7 @@ function loadTombstones() {
 }
 
 function saveTombstones(map) {
+  if (viewerMustNotWrite('tombstones')) return;
   try { localStorage.setItem(KEY_TOMBSTONES, JSON.stringify(map)); } catch { /* ignore */ }
 }
 
@@ -593,6 +688,7 @@ export function loadMeta() {
  * @param {object} meta - { activeProjectId, defaultProjectId, schemaVersion }
  */
 export function saveMeta(meta) {
+  if (viewerMustNotWrite('which project is open')) return;
   localStorage.setItem(KEY_META, JSON.stringify(meta));
 }
 
@@ -617,6 +713,7 @@ export function loadProjectMeta(projectId) {
  * @param {object} data
  */
 export function saveProjectMeta(projectId, data) {
+  if (viewerMustNotWrite('project settings')) return;
   localStorage.setItem(KEY_PROJECT_PREFIX + projectId, JSON.stringify(data));
 }
 
@@ -645,6 +742,7 @@ export function loadWorkspace(projectId, workspaceId) {
  * @param {object} data - { name, nodes, edges, groups, pins, images, lastModified }
  */
 export function saveWorkspace(projectId, workspaceId, data) {
+  if (viewerMustNotWrite('canvas')) return;
   localStorage.setItem(KEY_WORKSPACE_PREFIX + projectId + '-' + workspaceId, JSON.stringify(data));
 }
 
@@ -654,6 +752,7 @@ export function saveWorkspace(projectId, workspaceId, data) {
  * @param {string} workspaceId
  */
 export function removeWorkspaceLocal(projectId, workspaceId) {
+  if (viewerMustNotWrite('canvas removal')) return;
   localStorage.removeItem(KEY_WORKSPACE_PREFIX + projectId + '-' + workspaceId);
 }
 
@@ -680,6 +779,7 @@ export function loadTasks(projectId) {
  * @param {object} data - { tasks, taskGroups }
  */
 export function saveTasks(projectId, data) {
+  if (viewerMustNotWrite('task list')) return;
   localStorage.setItem(KEY_TASKS_PREFIX + projectId, JSON.stringify(data));
 }
 
@@ -913,6 +1013,7 @@ function loadRetryQueue() {
  * @param {Array} queue
  */
 function saveRetryQueue(queue) {
+  if (viewerMustNotWrite('upload retry list')) return;
   try {
     localStorage.setItem(RETRY_QUEUE_KEY, JSON.stringify(queue));
   } catch {
@@ -1023,6 +1124,7 @@ let _retryDrainInFlight = false;
  * @returns {Promise<void>}
  */
 export async function processRetryQueue() {
+  if (viewerMustNotWrite('upload retry')) return;
   if (!isFirebaseConfigured() || !db) return;
   if (_retryDrainInFlight) return;
 
@@ -1099,6 +1201,7 @@ export async function processRetryQueue() {
  *        saveFn throws unexpectedly (its own catch handles expected failures).
  */
 async function guardedFirestoreSave(key, saveFn, retryEntry) {
+  if (viewerMustNotWrite('cloud write')) return false;
   return firestoreWriteCoalescer.run(key, saveFn, (err) => {
     // saveFn is written to catch its own errors and enqueue them, so reaching
     // here means something escaped it. Route it to the retry queue anyway
@@ -1119,6 +1222,7 @@ async function guardedFirestoreSave(key, saveFn, retryEntry) {
  * @returns {Promise<{ status: 'ok'|'conflict', serverRev: number, serverData?: object }>}
  */
 async function transactionalWrite({ docRef, path, payload, mergeMode }) {
+  if (viewerMustNotWrite('cloud write')) throw new Error('A View tab does not write to the cloud.');
   // Debug switches, no-ops unless explicitly set. Placed before the transaction
   // so a simulated delay widens the real in-flight window and a simulated
   // failure travels the caller's genuine error path.
@@ -1160,6 +1264,7 @@ async function transactionalWrite({ docRef, path, payload, mergeMode }) {
  * @returns {Promise<boolean>} true on success or handled-conflict, false on error
  */
 export async function saveProjectToFirestore(projectId, metadata) {
+  if (viewerMustNotWrite('cloud: project settings')) return false;
   if (!isFirebaseConfigured() || !db) return false;
   const path = metaPath(projectId);
   // Bug 43: capture the dirty counter NOW, paired with `metadata` as the caller
@@ -1197,6 +1302,7 @@ export async function saveProjectToFirestore(projectId, metadata) {
  * @returns {Promise<boolean>}
  */
 export async function ensureWorkspaceIds(projectId, ids) {
+  if (viewerMustNotWrite('cloud: canvas list')) return false;
   if (!isFirebaseConfigured() || !db || !ids || ids.length === 0) return false;
   try {
     await updateDoc(doc(db, 'projects', projectId), {
@@ -1224,6 +1330,7 @@ export async function ensureWorkspaceIds(projectId, ids) {
  * @returns {Promise<boolean>}
  */
 export async function addWorkspaceIdToFirestore(projectId, workspaceId) {
+  if (viewerMustNotWrite('cloud: canvas list')) return false;
   if (!isFirebaseConfigured() || !db) return false;
   try {
     const docRef = doc(db, 'projects', projectId);
@@ -1246,6 +1353,7 @@ export async function addWorkspaceIdToFirestore(projectId, workspaceId) {
  * @returns {Promise<boolean>}
  */
 export async function removeWorkspaceIdFromFirestore(projectId, workspaceId) {
+  if (viewerMustNotWrite('cloud: canvas list')) return false;
   if (!isFirebaseConfigured() || !db) return false;
   try {
     const docRef = doc(db, 'projects', projectId);
@@ -1287,6 +1395,7 @@ export async function loadProjectFromFirestore(projectId) {
  * @returns {Promise<boolean>}
  */
 export async function saveWorkspaceToFirestore(projectId, workspaceId, data) {
+  if (viewerMustNotWrite('cloud: canvas')) return false;
   if (!isFirebaseConfigured() || !db) return false;
   const path = wsPath(projectId, workspaceId);
   const confirmedSeq = getDirtySeq(path); // Bug 43: paired with `data` as read
@@ -1327,6 +1436,7 @@ export async function saveWorkspaceToFirestore(projectId, workspaceId, data) {
  * @returns {Promise<boolean>}
  */
 export async function deleteWorkspaceFromFirestore(projectId, workspaceId) {
+  if (viewerMustNotWrite('cloud: delete canvas')) return false;
   if (!isFirebaseConfigured() || !db) return false;
   try {
     const docRef = doc(db, 'projects', projectId, 'workspaces', workspaceId);
@@ -1352,6 +1462,7 @@ export async function deleteWorkspaceFromFirestore(projectId, workspaceId) {
  * @returns {Promise<boolean>}
  */
 export async function deleteWorkspaceSafely(projectId, workspaceId) {
+  if (viewerMustNotWrite('cloud: delete canvas')) return false;
   addTombstone(projectId, workspaceId);
   // Also drop any local sync-state for this doc
   try {
@@ -1378,6 +1489,7 @@ export async function deleteWorkspaceSafely(projectId, workspaceId) {
  * @returns {Promise<boolean>}
  */
 export async function deleteProjectFromFirestore(projectId, workspaceIds = []) {
+  if (viewerMustNotWrite('cloud: delete project')) return false;
   if (!isFirebaseConfigured() || !db) return false;
   try {
     // Delete all workspace subcollection documents
@@ -1522,6 +1634,7 @@ export async function reconcileWorkspaceIds(projectId) {
  * @returns {Promise<boolean>}
  */
 export async function saveTasksToFirestore(projectId, data) {
+  if (viewerMustNotWrite('cloud: task list')) return false;
   if (!isFirebaseConfigured() || !db) return false;
   const path = tasksPath(projectId);
   const confirmedSeq = getDirtySeq(path); // Bug 43: paired with `data` as read
@@ -1571,6 +1684,7 @@ export async function loadTasksFromFirestore(projectId) {
  * @returns {Promise<boolean>}
  */
 export async function saveUserMeta(meta) {
+  if (viewerMustNotWrite('cloud: which project is open')) return false;
   if (!isFirebaseConfigured() || !db) return false;
   return guardedFirestoreSave('userMeta/main', async () => {
     try {
@@ -1934,6 +2048,7 @@ export function sanitizeWorkspaceImages(images) {
  * @returns {Promise<boolean>} true if all saves succeeded, false if any failed
  */
 export async function manualServerSync(activeProjectId) {
+  if (viewerMustNotWrite('manual sync')) return false;
   if (!isFirebaseConfigured() || !db || !activeProjectId) return false;
 
   // First flush any pending debounced saves
@@ -2125,6 +2240,7 @@ function buildProjectSnapshotData(projectId) {
  * @param {'auto'|'manual'|'conflict-backup'|'pre-restore'} reason
  */
 export async function createSnapshot(projectId, reason = 'auto') {
+  if (viewerMustNotWrite('cloud: version snapshot')) return null;
   if (!isFirebaseConfigured() || !db || !projectId) return null;
   const data = buildProjectSnapshotData(projectId);
   if (!data) return null;
