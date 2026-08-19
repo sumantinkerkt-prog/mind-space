@@ -549,10 +549,25 @@ export default function WorkflowApp() {
   const animTimerRef = useRef(null);
   const toggleEditingStateRef = useRef(null);
   const pasteOffsetRef = useRef(0);
+  // Keyboard accelerators for Export / Sync to Server. These are held in refs
+  // (the same pattern as toggleEditingStateRef/addNodeRef) so the one-time
+  // window keydown listener always calls the CURRENT handler. exportData is a
+  // plain function re-created every render and closes over workspaces/tasks, so
+  // capturing it once would export stale data; putting it in the effect's deps
+  // instead would re-register a window listener on every render, which is hot
+  // during node drags.
+  const exportDataRef = useRef(null);
+  const manualServerSyncRef = useRef(null);
 
   // Ref to track activeTab without causing useCallback identity changes
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
+
+  // Ref to track syncStatus so the Ctrl+Shift+D accelerator can mirror the Sync
+  // to Server button's own `disabled` condition without re-registering its
+  // listener on every status change.
+  const syncStatusRef = useRef(syncStatus);
+  syncStatusRef.current = syncStatus;
 
   // --- Debounced SERVER savers (3s debounce, 30s maximum-wait ceiling) ---
   // The 30s ceiling guarantees the cloud is never more than ~30s behind, even
@@ -5291,6 +5306,53 @@ export default function WorkflowApp() {
     URL.revokeObjectURL(url);
   };
 
+  // Keep the accelerators pointed at the live handlers (see exportDataRef above).
+  exportDataRef.current = exportData;
+  manualServerSyncRef.current = handleManualServerSync;
+
+  // --- Ctrl+Shift+E = Export / Take Backup, Ctrl+Shift+D = Sync to Server ---
+  // These are ONLY accelerators for the two existing sidebar buttons: they call
+  // the exact same handlers (exportData / handleManualServerSync) and add no
+  // logic of their own. In particular Ctrl+Shift+D changes nothing about sync
+  // behaviour - automatic sync stays on, and this is simply a faster way to ask
+  // for the existing manual "push my current work now" action, so it still goes
+  // through cloudUploadAllowed(), the viewer boundary and the version/conflict
+  // checks inside manualServerSync().
+  useEffect(() => {
+    const handleQuickActionKey = (e) => {
+      // Never steal keys while the user is typing.
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
+      // Require exactly Ctrl (or Cmd on macOS) + Shift. Rejecting Alt keeps us
+      // clear of Alt+Shift+X, and requiring Ctrl keeps us clear of the bare "E"
+      // (card editor) and reference-mode "Shift+D" (descriptions) shortcuts,
+      // both of which bail out when ctrlKey is set.
+      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey) return;
+      // e.key is already case-normalised by Shift, so compare case-insensitively.
+      const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+
+      if (key === 'e') {
+        // Export is read-only, so it is available wherever the Export button is
+        // (that button is intentionally rendered in reference tabs too).
+        e.preventDefault();
+        exportDataRef.current?.();
+        return;
+      }
+
+      if (key === 'd') {
+        // Sync writes, so it is editor-context only - exactly like its button,
+        // which lives inside `{!isReferenceMode && (...)}`.
+        if (isReferenceMode) return;
+        // Mirror the button's disabled condition so the shortcut cannot start a
+        // second sync while one is already in flight.
+        if (syncStatusRef.current === 'syncing' || !isFirebaseConfigured()) return;
+        e.preventDefault();
+        manualServerSyncRef.current?.();
+      }
+    };
+    window.addEventListener('keydown', handleQuickActionKey);
+    return () => window.removeEventListener('keydown', handleQuickActionKey);
+  }, [isReferenceMode]);
+
   const exportSelectedNodes = (nodeIds) => {
     if (!nodeIds || nodeIds.length === 0) return;
 
@@ -8193,7 +8255,7 @@ export default function WorkflowApp() {
                       <Upload className="w-4 h-4 mr-1.5" /> Import
                     </button>
                   )}
-                  <button onClick={exportData} className="flex-1 flex items-center justify-center px-3 py-2 hover:bg-slate-100 text-slate-600 text-sm font-medium rounded-lg border border-slate-200 transition-colors" title="Export Map JSON">
+                  <button onClick={exportData} className="flex-1 flex items-center justify-center px-3 py-2 hover:bg-slate-100 text-slate-600 text-sm font-medium rounded-lg border border-slate-200 transition-colors" title="Export Map JSON (Ctrl+Shift+E)">
                     <Download className="w-4 h-4 mr-1.5" /> Export
                   </button>
                 </div>
@@ -8215,7 +8277,7 @@ export default function WorkflowApp() {
                         ? 'bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed'
                         : 'hover:bg-green-50 border-slate-200 text-slate-600 hover:text-green-700 hover:border-green-300'
                   }`}
-                  title={!isFirebaseConfigured() ? 'Cloud sync not configured' : 'Manually sync all data to server'}
+                  title={!isFirebaseConfigured() ? 'Cloud sync not configured' : 'Manually sync all data to server (Ctrl+Shift+D)'}
                 >
                   {syncStatus === 'syncing' ? <Loader className="w-4 h-4 animate-spin" /> : <Cloud className="w-4 h-4" />}
                   {syncStatus === 'syncing' ? 'Syncing...' : 'Sync to Server'}
