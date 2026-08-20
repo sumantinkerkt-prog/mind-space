@@ -8256,21 +8256,6 @@ export default function WorkflowApp() {
             <span className="hidden sm:inline">{isArrangeMode ? 'Arrange' : 'Full Edit'}</span>
           </button>
 
-          {/* Ghost Card toggle - a placement guide, not a mode: it changes
-              nothing about how the canvas behaves, only what you can see. */}
-          <button
-            onClick={() => setShowGhostCard(prev => !prev)}
-            className={`flex items-center gap-1 px-1.5 sm:px-2.5 py-1 rounded-lg text-xs font-bold transition-all border ${
-              showGhostCard
-                ? 'bg-emerald-50 border-emerald-300 text-emerald-700 hover:bg-emerald-100'
-                : 'bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100'
-            }`}
-            title={showGhostCard ? 'Hide the new-card placement guide (G)' : 'Show where the next new card will land (G)'}
-          >
-            <Crosshair className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Ghost</span>
-          </button>
-
           {/* Open the current workspace in a NEW read-only Reference tab.
               The old "Preview" toggle used to sit here; see the isPreviewMode
               docblock for why it was retired in favour of this button. */}
@@ -9027,6 +9012,11 @@ export default function WorkflowApp() {
                         setEditingTextNode(null);
                       }}
                       onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.preventDefault();
+                          setEditingTextNode(null);
+                          return;
+                        }
                         const intent = titleKeyIntent(e.key, { shiftKey: e.shiftKey, descriptionVisible });
                         if (intent === TITLE_KEY_INTENT.COMMIT) {
                           e.preventDefault();
@@ -9070,7 +9060,13 @@ export default function WorkflowApp() {
                           className="w-full h-full min-h-[2rem] bg-transparent resize-none focus:outline-none text-slate-600 text-xs leading-relaxed placeholder-slate-400 custom-scrollbar" 
                           value={node.content || ''} 
                           onChange={(e) => updateNode(node.id, { content: e.target.value })} 
-                          placeholder="Write notes or details..." 
+                          placeholder="Write notes or details..."
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') {
+                              e.preventDefault();
+                              setEditingTextNode(null);
+                            }
+                          }}
                         />
                       ) : (
                         <div 
@@ -9290,7 +9286,7 @@ export default function WorkflowApp() {
               card while staying nailed to the centre as the canvas pans beneath. */}
           {showGhostCard && !isPreviewMode && (
             <div
-              className="absolute left-1/2 top-1/2 z-[45] pointer-events-none rounded-xl border-2 border-dashed border-indigo-400/80 bg-indigo-400/10"
+              className="absolute left-1/2 top-1/2 z-[45] pointer-events-none rounded-xl bg-indigo-400/10"
               style={{
                 width: ghostCardSize.width,
                 height: ghostCardSize.height,
