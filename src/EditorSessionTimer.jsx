@@ -81,7 +81,8 @@ export default function EditorSessionTimer({ blocked = false, onExpire }) {
   onExpireRef.current = onExpire;
 
   // Reset back to a full 5:00 session ("I'm still actively working"). Used by
-  // both the pill click and the popup's "Stay in Editor" action. No confirm.
+  // the pill click, the popup's "Stay in Editor" action, and the Shift+T
+  // shortcut below - one function, so all three behave identically. No confirm.
   // Bumping the epoch invalidates any expiry hand-off already awaiting a flush.
   const reset = useCallback(() => {
     epochRef.current += 1;
@@ -94,6 +95,34 @@ export default function EditorSessionTimer({ blocked = false, onExpire }) {
     if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
     flashTimerRef.current = setTimeout(() => setFlash(false), 240);
   }, []);
+
+  // Keyboard shortcut for the reset above: Shift+T ("T" for Timer), so staying
+  // in the editor never requires reaching for the mouse.
+  //
+  // It calls the SAME `reset` as the pill click and the popup's "Stay in
+  // Editor" button - no parallel reset path, so the three can never diverge.
+  //
+  // Scope comes for free from the mount lifecycle: the parent renders this
+  // component only while the editor session is active, so the listener simply
+  // does not exist when there is no timer to reset.
+  //
+  // Chord choice: every bare-letter shortcut in App.jsx bails out on
+  // `e.shiftKey`, so Shift+T cannot collide with the bare "T" task panel (or
+  // its TT double-press). Ctrl/Cmd/Alt are rejected here for the mirror-image
+  // reason - it keeps this clear of Ctrl+Shift+* and Alt+Shift+X.
+  useEffect(() => {
+    const handleResetKey = (e) => {
+      // Never steal keys while the user is typing a title, description, etc.
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (!e.shiftKey) return;
+      if (e.key !== 'T' && e.key !== 't') return;
+      e.preventDefault();
+      reset();
+    };
+    window.addEventListener('keydown', handleResetKey);
+    return () => window.removeEventListener('keydown', handleResetKey);
+  }, [reset]);
 
   // Fire the expiry hand-off at most once per "arming". If the parent defers
   // (returns without the tab leaving the editor) or errors, we back off before
@@ -180,8 +209,8 @@ export default function EditorSessionTimer({ blocked = false, onExpire }) {
       <button
         type="button"
         onClick={reset}
-        aria-label={`Editor session auto-redirects in ${formatTime(remaining)}. Click to reset to 5 minutes.`}
-        title="Editor session timer - click to stay in the editor (resets to 5:00)"
+        aria-label={`Editor session auto-redirects in ${formatTime(remaining)}. Click, or press Shift+T, to reset to 5 minutes.`}
+        title="Editor session timer - click or press Shift+T to stay in the editor (resets to 5:00)"
         className={`flex items-center gap-1.5 px-2 py-1 rounded-full border text-xs font-semibold tabular-nums transition-colors shrink-0 select-none ${isCritical ? 'animate-attention' : ''}`}
         style={pillStyle}
       >
