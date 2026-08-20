@@ -3942,7 +3942,7 @@ export default function WorkflowApp() {
     };
   }, [selectedNodeIds, nodes, showToast, getRenderedNodeDimensions]);
 
-  // --- P key toggles pin visibility, PP (double-press) toggles pin panel, Shift+P drops pin at viewport center ---
+  // --- P key toggles pin panel, PP (double-press) toggles pin visibility, Shift+P drops pin at viewport center ---
   useEffect(() => {
     const handlePinKey = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
@@ -3962,13 +3962,13 @@ export default function WorkflowApp() {
         const timeSinceLast = now - lastPKeyTimeRef.current;
         lastPKeyTimeRef.current = now;
         if (timeSinceLast < 300) {
-          // Double-press P: toggle pin panel
-          setShowPinPanel(prev => !prev);
+          // Double-press P: toggle pin visibility
+          setPinsVisible(prev => !prev);
         } else {
-          // Single press P: toggle pin visibility (delayed to allow double-press detection)
+          // Single press P: toggle pin panel (delayed to allow double-press detection)
           setTimeout(() => {
             if (Date.now() - lastPKeyTimeRef.current >= 280) {
-              setPinsVisible(prev => !prev);
+              setShowPinPanel(prev => !prev);
             }
           }, 300);
         }
