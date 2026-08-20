@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Pencil, X, Palette, Check, Eye, EyeOff } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Pencil, X, Palette, Check, Eye, EyeOff, Link2, ExternalLink, ChevronDown, ChevronRight } from 'lucide-react';
 import MarkdownRenderer from './MarkdownRenderer';
 import { PanelResizeHandle, PanelWidthPresets } from './PanelResize';
+import { extractLinks } from './cardLinks';
 
 // Theme options matching the THEMES constant in App.jsx
 const THEME_OPTIONS = [
@@ -23,7 +24,14 @@ export default function CardEditorPanel({ className = '', selectedNode, onUpdate
   const [theme, setTheme] = useState('blue');
   const [showThemePicker, setShowThemePicker] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
+  const [showLinks, setShowLinks] = useState(true);
   const themePickerRef = useRef(null);
+
+  // Derived from the LIVE editor state, not from `selectedNode`, so a link
+  // appears the moment it is pasted and disappears the moment it is deleted.
+  // Nothing is stored: see the header comment in cardLinks.js for why the list
+  // is re-read from the text instead of being kept on the card.
+  const links = useMemo(() => extractLinks(title, content), [title, content]);
 
   useEffect(() => {
     if (selectedNode) {
@@ -168,7 +176,8 @@ export default function CardEditorPanel({ className = '', selectedNode, onUpdate
           </p>
         </div>
       ) : (
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-3 flex flex-col gap-3">
+        <>
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-3 flex flex-col gap-3 min-h-0">
           {/* Title */}
           <div className="shrink-0">
             <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wide block mb-1">Title</label>
@@ -208,6 +217,87 @@ export default function CardEditorPanel({ className = '', selectedNode, onUpdate
             </div>
           )}
         </div>
+
+        {/*
+          LINKS — every address found in this card's title and content.
+
+          Sits OUTSIDE the scrolling area above, so a long card cannot push the
+          links out of reach, and is hidden entirely when the card has no links:
+          a text-only card looks exactly as it did before this feature existed.
+
+          Read-only, so it is left enabled in View and Arrange mode. It changes
+          no card data and takes no snapshot.
+        */}
+        {links.length > 0 && (
+          <div className="shrink-0 border-t border-slate-200 bg-slate-50">
+            <button
+              onClick={() => setShowLinks(!showLinks)}
+              className="w-full flex items-center gap-1.5 px-3 py-2 text-left hover:bg-slate-100 transition-colors"
+              title={showLinks ? 'Hide links' : 'Show links'}
+            >
+              {showLinks
+                ? <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" />
+                : <ChevronRight className="w-3 h-3 text-slate-400 shrink-0" />}
+              <Link2 className="w-3.5 h-3.5 text-cyan-600 shrink-0" />
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">
+                Links ({links.length})
+              </span>
+            </button>
+
+            {showLinks && (
+              <div className="max-h-[152px] overflow-y-auto custom-scrollbar px-3 pb-2.5 flex flex-col gap-1.5">
+                {links.map((link) => (
+                  <div
+                    key={link.url}
+                    className="group flex items-center gap-2 bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 hover:border-cyan-300 transition-colors"
+                  >
+                    {/*
+                      A real <a> rather than a div with an onClick handler. That
+                      is what gives single-click opening, plus middle-click,
+                      Ctrl+click and right-click "Copy link address" for free,
+                      and it keeps the row reachable by keyboard.
+
+                      target="_blank" opens a TAB. window.open with a features
+                      string — as used elsewhere in App.jsx — is what produces a
+                      stripped-down popup WINDOW instead, so it is avoided here.
+
+                      stopPropagation matches MarkdownRenderer's anchor: the
+                      click must not reach the canvas selection handlers.
+                    */}
+                    <a
+                      href={link.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      className="flex-1 min-w-0 flex flex-col"
+                      title={link.url}
+                    >
+                      <span className="text-xs text-indigo-600 group-hover:underline truncate font-medium">
+                        {link.label}
+                      </span>
+                      <span className="text-[10px] text-slate-400 truncate">
+                        {link.url}
+                      </span>
+                    </a>
+
+                    <a
+                      href={link.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-md border border-slate-200 bg-white text-[10px] font-semibold text-slate-500 hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 transition-colors"
+                      title={`Open ${link.url} in a new tab`}
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      <span className="whitespace-nowrap">Open in new tab</span>
+                    </a>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        </>
       )}
     </div>
   );
