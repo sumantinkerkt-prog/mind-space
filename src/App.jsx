@@ -3046,6 +3046,24 @@ export default function WorkflowApp() {
     toastTimerRef.current = setTimeout(() => setToastMessage(''), 2000);
   }, []);
 
+  // Put a card's description on the OS clipboard, and nothing else: no title, no id,
+  // no metadata. Read-only by design, so it takes no snapshot and triggers no save.
+  const copyCardContent = useCallback(async (node) => {
+    const text = node?.content || '';
+    if (!text.trim()) {
+      showToast('No description to copy');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('Description copied');
+    } catch {
+      // Clipboard access can be refused (permissions, or a non-secure origin).
+      // Same fallback as the Data Health report: a selectable prompt beats failing silently.
+      window.prompt('Copy the description with Ctrl+C:', text);
+    }
+  }, [showToast]);
+
 
   // --- Toggle Editing State (Full Edit <-> Arrange) ---
   const toggleEditingState = useCallback(() => {
@@ -9196,6 +9214,14 @@ export default function WorkflowApp() {
                   {/* Hover toolbar */}
                   {!isPreviewMode && (
                   <div className="absolute -top-8 right-1 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-white rounded-md shadow border border-slate-200 px-1 py-0.5" onPointerDown={(e) => e.stopPropagation()}>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); copyCardContent(node); }}
+                      className="p-1 hover:bg-slate-100 rounded text-slate-500"
+                      title="Copy description"
+                      aria-label="Copy description"
+                    >
+                      <Copy className="w-3 h-3" />
+                    </button>
                     <button 
                       onClick={(e) => { e.stopPropagation(); setOpenLinkPicker(openLinkPicker === node.id ? null : node.id); setOpenColorPicker(null); }}
                       className={`p-1 hover:bg-slate-100 rounded text-slate-500 ${node.linkToTab ? 'text-indigo-600' : ''}`}
