@@ -4352,6 +4352,11 @@ export default function WorkflowApp() {
       if (isPreviewMode) return;
       // Don't capture if user is typing in an input/textarea
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      // Bare arrows only. Shift+Arrow pans the canvas (see the effect below), and
+      // this handler used to accept any modifier - so with a card selected, one
+      // Shift+Arrow press would have nudged the card AND panned the canvas,
+      // turning a viewport-only shortcut into a data write.
+      if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
       const STEP = 20;
       let dx = 0, dy = 0;
       if (e.key === 'ArrowUp') dy = -STEP;
@@ -4374,6 +4379,62 @@ export default function WorkflowApp() {
     window.addEventListener('keydown', handleArrowKeys);
     return () => window.removeEventListener('keydown', handleArrowKeys);
   }, [selectedNodeIds, takeSnapshot, updateActiveWorkspace]);
+
+  // --- Shift + Arrow keys pan the canvas ---
+  //
+  // Removes the last mouse dependency from the make-a-series-of-cards loop:
+  // N -> title -> Tab -> description -> Esc -> Shift+Arrow -> N -> repeat.
+  //
+  // Nothing new is invented to make this work. The Ghost Card is pinned to the
+  // centre of the SCREEN rather than to a canvas coordinate, and addNode already
+  // places a card at the centre of the viewport, so moving the canvas is all it
+  // takes to re-aim the next N. Pan and aim are the same number.
+  //
+  // VIEWPORT ONLY, and that is a guarantee rather than an intention: the single
+  // write below targets `transform`, the same state the mouse drag writes in
+  // handlePointerMove. `transform` is in no autosave effect's dependency array,
+  // is absent from the object takeSnapshot clones, and is not part of the
+  // Firestore payload - so panning cannot produce a save, a sync, a dirty flag or
+  // an undo entry. Contrast the plain-arrow handler above, which moves cards and
+  // therefore has to snapshot and write the workspace.
+  //
+  // Shift+Arrow, not plain Arrow, because plain arrows are already spoken for -
+  // they nudge the selected cards (above) and drive the MiniMap frame. Alt+Arrow
+  // is the browser's back/forward and Ctrl/Cmd+Arrow belongs to the OS and to
+  // word-wise caret movement, which leaves Shift+Arrow as the one combination no
+  // existing shortcut touches.
+  useEffect(() => {
+    const handlePanKeys = (e) => {
+      // Typing always wins. Inside a text field Shift+Arrow means "extend the
+      // selection", so bail out BEFORE preventDefault and leave the keystroke
+      // exactly as the browser intended it.
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
+      if (!e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+
+      // Screen pixels per press, so one press always moves the view the same
+      // visible distance no matter how far in or out the canvas is zoomed. Held
+      // down, the key's own auto-repeat pans continuously, which is what lets the
+      // step stay small enough to aim a card with.
+      const STEP = 120;
+      let dx = 0, dy = 0;
+      // The arrow points where the VIEWPORT travels, so Right reveals more of the
+      // canvas to the right, which means the canvas layer itself shifts left.
+      // Same sign convention as the MiniMap's frame nav.
+      if (e.key === 'ArrowLeft') dx = STEP;
+      else if (e.key === 'ArrowRight') dx = -STEP;
+      else if (e.key === 'ArrowUp') dy = STEP;
+      else if (e.key === 'ArrowDown') dy = -STEP;
+      else return;
+
+      e.preventDefault();
+      // Deliberately not wrapped in setIsAnimatingTransform: a 250ms glide would
+      // fight the key's auto-repeat and lag behind the keystrokes. Instant, like
+      // the mouse drag.
+      setTransform(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+    };
+    window.addEventListener('keydown', handlePanKeys);
+    return () => window.removeEventListener('keydown', handlePanKeys);
+  }, []);
 
   // --- Clear selection on workspace tab change ---
   useEffect(() => {
@@ -9384,7 +9445,7 @@ export default function WorkflowApp() {
               <button
                 onClick={() => setShowGhostCard(prev => !prev)}
                 className={`p-1.5 sm:p-2 rounded-md transition-colors ${showGhostCard ? 'bg-emerald-50 text-emerald-600' : 'text-slate-600 hover:bg-slate-100'}`}
-                title={showGhostCard ? 'Hide the new-card placement guide (G)' : 'Show where the next new card will land (G)'}
+                title={showGhostCard ? 'Hide the new-card placement guide (G) \u2014 Shift+Arrows pan the canvas under it' : 'Show where the next new card will land (G) \u2014 Shift+Arrows pan the canvas under it'}
               >
                 <Crosshair className="w-4 h-4 sm:w-5 sm:h-5" />
               </button>
