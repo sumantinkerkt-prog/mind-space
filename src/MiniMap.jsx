@@ -271,6 +271,10 @@ export default function MiniMap({
 
     const handleKeyDown = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      // Shift+Arrow is the canvas pan shortcut, owned by App. Leave it alone:
+      // this handler calls stopImmediatePropagation, so without this bail-out it
+      // would swallow the pan and move the canvas by its own step instead.
+      if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
       const arrowKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
       if (!arrowKeys.includes(e.key)) return;
 
