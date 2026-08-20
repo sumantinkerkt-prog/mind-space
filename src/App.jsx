@@ -6,7 +6,7 @@ import {
   Download, Upload, Undo2, Redo2, Layers, Link2, ExternalLink,
   Sparkles, PanelLeftClose, PanelLeft,
   Copy, ArrowUp, ArrowDown, RefreshCw, LayoutList, MonitorSpeaker,
-  MoreVertical, ImageIcon, ChevronUp, Scissors, ClipboardPaste,
+  MoreVertical, ImageIcon, ChevronUp, Scissors, ClipboardPaste, ClipboardCopy,
   Lock, Shield, Eye, EyeOff, GitBranch, Map, Timer, Crosshair,
   MapPin, Bell, Pencil, MousePointer, ListTodo, Cloud, CloudOff, Loader,
   AlertTriangle, Settings, Maximize2, Minimize2,
@@ -3045,6 +3045,38 @@ export default function WorkflowApp() {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setToastMessage(''), 2000);
   }, []);
+
+  // --- Copy a card's description to the system clipboard ---
+  // Strictly read-only: no takeSnapshot (nothing to undo), no updateNode, and no
+  // persistence, so copying never marks the workspace dirty or triggers a sync.
+  // Deliberately separate from the internal `nexus-clipboard` card clipboard used
+  // by cut/copy/paste - this only puts the note text on the OS clipboard.
+  const copyCardContent = useCallback(async (node) => {
+    const text = (node?.content || '').trim();
+    if (!text) { showToast('No description to copy'); return; }
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+      await navigator.clipboard.writeText(text);
+      showToast('Description copied');
+    } catch {
+      // navigator.clipboard needs a secure context, so fall back to the legacy
+      // path for plain-HTTP LAN previews and older browsers.
+      try {
+        const scratch = document.createElement('textarea');
+        scratch.value = text;
+        scratch.setAttribute('readonly', '');
+        scratch.style.position = 'fixed';
+        scratch.style.opacity = '0';
+        document.body.appendChild(scratch);
+        scratch.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(scratch);
+        showToast(ok ? 'Description copied' : 'Copy failed');
+      } catch {
+        showToast('Copy failed');
+      }
+    }
+  }, [showToast]);
 
 
   // --- Toggle Editing State (Full Edit <-> Arrange) ---
@@ -9225,6 +9257,7 @@ export default function WorkflowApp() {
                         ))}
                       </div>
                     )}
+                    <button onClick={(e) => { e.stopPropagation(); copyCardContent(node); }} className="p-1 hover:bg-slate-100 rounded text-slate-500" title="Copy description" aria-label="Copy description"><ClipboardCopy className="w-3 h-3"/></button>
                     <button onClick={() => deleteNode(node.id)} className="p-1 hover:bg-red-100 hover:text-red-600 rounded text-slate-400" title="Delete"><X className="w-3 h-3"/></button>
                   </div>
                   )}

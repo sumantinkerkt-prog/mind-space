@@ -60,13 +60,26 @@ const markdownComponents = {
   blockquote: ({ children }) => (
     <blockquote className="border-l-2 border-slate-300 pl-2 my-1 text-slate-500 italic">{children}</blockquote>
   ),
+  // Opening a link is deliberately gated behind Shift+Click. A plain click lands on
+  // card content too easily while selecting, dragging or entering edit mode, and an
+  // accidental tab-open is jarring, so the default is always suppressed and only the
+  // explicit Shift gesture navigates. `stopPropagation` keeps the click off the card
+  // (no select / no edit-mode entry); `preventDefault` guarantees a plain click can
+  // never navigate even though `target`/`rel` remain for native middle/Ctrl+click.
+  // This override is the app's only anchor, so Edit, Arrange and View all behave the
+  // same - read-only View gets no special-cased link handling.
   a: ({ href, children }) => (
     <a
       href={href}
       target="_blank"
       rel="noopener noreferrer"
       className="text-indigo-600 hover:underline cursor-pointer"
-      onClick={(e) => e.stopPropagation()}
+      title="Shift + Click to open in a new tab"
+      onClick={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        if (e.shiftKey && href) window.open(href, '_blank', 'noopener,noreferrer');
+      }}
     >
       {children}
     </a>
