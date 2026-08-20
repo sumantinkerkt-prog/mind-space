@@ -3036,6 +3036,11 @@ export default function WorkflowApp() {
 
   const cardEditorNode = (selectedNodeIds.length === 1) ? nodes.find(n => n.id === selectedNodeIds[0]) : null;
 
+  // The card that "pick a node first" actions anchor to. A plain click now writes
+  // selectedNodeIds rather than focusedNodeId, so prefer a lone selection; focusedNodeId
+  // still covers the transient reveal flashes (audit reveal, clone jump, outline row).
+  const anchorNodeId = (selectedNodeIds.length === 1 ? selectedNodeIds[0] : null) || focusedNodeId;
+
   const updateActiveWorkspace = useCallback((updater) => {
     setWorkspaces(prev => prev.map(ws => ws.id === activeTab ? { ...ws, ...updater(ws) } : ws));
   }, [activeTab]);
@@ -5789,32 +5794,32 @@ export default function WorkflowApp() {
         offsetX = centerX - minX - 170;
         offsetY = centerY - minY - 80;
       }
-    } else if (partialImportPlacement === 'inside-selected' && focusedNodeId) {
-      const targetNode = nodes.find(n => n.id === focusedNodeId);
+    } else if (partialImportPlacement === 'inside-selected' && anchorNodeId) {
+      const targetNode = nodes.find(n => n.id === anchorNodeId);
       if (targetNode) {
         offsetX = targetNode.x - minX;
         offsetY = targetNode.y + 200 - minY;
       }
-    } else if (partialImportPlacement === 'left' && focusedNodeId) {
-      const targetNode = nodes.find(n => n.id === focusedNodeId);
+    } else if (partialImportPlacement === 'left' && anchorNodeId) {
+      const targetNode = nodes.find(n => n.id === anchorNodeId);
       if (targetNode) {
         offsetX = targetNode.x - 400 - minX;
         offsetY = targetNode.y - minY;
       }
-    } else if (partialImportPlacement === 'right' && focusedNodeId) {
-      const targetNode = nodes.find(n => n.id === focusedNodeId);
+    } else if (partialImportPlacement === 'right' && anchorNodeId) {
+      const targetNode = nodes.find(n => n.id === anchorNodeId);
       if (targetNode) {
         offsetX = targetNode.x + 400 - minX;
         offsetY = targetNode.y - minY;
       }
-    } else if (partialImportPlacement === 'top' && focusedNodeId) {
-      const targetNode = nodes.find(n => n.id === focusedNodeId);
+    } else if (partialImportPlacement === 'top' && anchorNodeId) {
+      const targetNode = nodes.find(n => n.id === anchorNodeId);
       if (targetNode) {
         offsetX = targetNode.x - minX;
         offsetY = targetNode.y - 250 - minY;
       }
-    } else if (partialImportPlacement === 'bottom' && focusedNodeId) {
-      const targetNode = nodes.find(n => n.id === focusedNodeId);
+    } else if (partialImportPlacement === 'bottom' && anchorNodeId) {
+      const targetNode = nodes.find(n => n.id === anchorNodeId);
       if (targetNode) {
         offsetX = targetNode.x - minX;
         offsetY = targetNode.y + 250 - minY;
@@ -6247,8 +6252,15 @@ export default function WorkflowApp() {
           updateHistory(newPast, []);
         }
       } else {
-        // Click (no drag) - select the node
-        setFocusedNodeId(draggingNode.id);
+        // Click (no drag) - a plain click owns single selection.
+        // Select this card exclusively, or clear it when it is already the whole
+        // selection, so clicking the same card twice is a select/deselect toggle.
+        // Clicking a member of a multi-selection collapses down to just that card.
+        setSelectedNodeIds(prev =>
+          (prev.length === 1 && prev[0] === draggingNode.id) ? [] : [draggingNode.id]
+        );
+        // Drop any lingering reveal flash: a deliberate click means it was found.
+        setFocusedNodeId(null);
         setFocusedGroupId(null);
         bringToFront(draggingNode.id);
       }
@@ -8973,7 +8985,10 @@ export default function WorkflowApp() {
                   className={`absolute rounded-lg border shadow-sm pointer-events-auto group flex flex-col ${
                     isDragging ? 'shadow-lg scale-[1.02] z-[9999]' : 'transition-all duration-150'
                   } ${
-                    isFocused ? 'ring-4 ring-indigo-500 animate-[pulse_1.5s_infinite]' : ''
+                    // Reveal flash (audit reveal / clone jump / outline row). Suppressed
+                    // when the card is also selected, otherwise the two rings collide and
+                    // Tailwind's later ring-2 silently wins on width.
+                    isFocused && !selectedNodeIds.includes(node.id) ? 'ring-4 ring-indigo-500 animate-[pulse_1.5s_infinite]' : ''
                   } ${selectedNodeIds.includes(node.id) ? 'ring-2 ring-offset-1' : 'border-slate-200 hover:border-slate-300'} ${
                     connectHoverNodeId === node.id ? 'ring-2 ring-green-400 shadow-lg shadow-green-200/50' : ''
                   } ${xrayCards ? 'opacity-50' : ''}`}
@@ -9017,7 +9032,16 @@ export default function WorkflowApp() {
                       );
                       return;
                     }
-                    if (isPreviewMode) return;
+                    if (isPreviewMode) {
+                      // Read-only View tab: there is no drag to discriminate against, so
+                      // pointer-down *is* the click. Shift+click already selects here, so
+                      // plain click must too. Selection is pure UI state and writes
+                      // nothing, hence no bringToFront (that would reorder ws.nodes).
+                      setSelectedNodeIds(prev =>
+                        (prev.length === 1 && prev[0] === node.id) ? [] : [node.id]
+                      );
+                      return;
+                    }
                     nodeTapRef.current = { id: node.id, startX: e.clientX, startY: e.clientY, time: Date.now(), pointerType: e.pointerType };
                     dragSnapshot.current = JSON.parse(JSON.stringify(stateRef.current));
                     bringToFront(node.id);
@@ -10527,17 +10551,17 @@ export default function WorkflowApp() {
                       <button
                         key={opt.value}
                         onClick={() => setPartialImportPlacement(opt.value)}
-                        disabled={!opt.always && !focusedNodeId}
+                        disabled={!opt.always && !anchorNodeId}
                         className={`w-full text-left px-3 py-2.5 rounded-lg text-sm font-medium transition-all border ${
                           partialImportPlacement === opt.value
                             ? 'bg-indigo-50 border-indigo-300 text-indigo-700'
-                            : !opt.always && !focusedNodeId
+                            : !opt.always && !anchorNodeId
                               ? 'bg-slate-50 border-slate-100 text-slate-300 cursor-not-allowed'
                               : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'
                         }`}
                       >
                         {opt.label}
-                        {!opt.always && !focusedNodeId && <span className="text-xs text-slate-400 ml-2">(select a node first)</span>}
+                        {!opt.always && !anchorNodeId && <span className="text-xs text-slate-400 ml-2">(select a node first)</span>}
                       </button>
                     ))}
                   </div>
