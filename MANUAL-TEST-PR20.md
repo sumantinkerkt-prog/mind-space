@@ -362,10 +362,21 @@ worth knowing that this is inherited behaviour, not something this change introd
 
 # 7. Owner sign-off
 
-**Result: ☐ ___ of 22 PASS.** Not yet signed off.
+**Result: 22 of 22 PASS.** Signed off by the owner on 20 August 2026, covering all
+five groups — the four ways of writing a link (A), opening a link without disturbing
+the card (B), the list keeping up and staying out of the way (C), the judgement calls
+on punctuation, brackets, code blocks and file paths (D), and the refusal of a
+`javascript:` link plus the View and Arrange tabs (E).
+
+This includes **B1**, that a link opens in a new browser **tab** and not a floating
+window, and **E1**, that a `javascript:` link produces no clickable element at all —
+the two I could not verify myself.
+
+Merged to `main` on that basis.
 
 ---
 
 # 8. Changes to this document
 
 - **v1** — written with the feature.
+- **v2** — owner sign-off recorded: 22 of 22 PASS.
