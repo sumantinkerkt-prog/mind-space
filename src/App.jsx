@@ -7,7 +7,7 @@ import {
   Sparkles, PanelLeftClose, PanelLeft,
   Copy, ArrowUp, ArrowDown, RefreshCw, LayoutList, MonitorSpeaker,
   MoreVertical, ImageIcon, ChevronUp, Scissors, ClipboardPaste,
-  Lock, Shield, Eye, EyeOff, GitBranch, Map, Timer,
+  Lock, Shield, Eye, EyeOff, GitBranch, Map, Timer, Crosshair,
   MapPin, Bell, Pencil, MousePointer, ListTodo, Cloud, CloudOff, Loader,
   AlertTriangle, Settings, Maximize2, Minimize2,
   ShieldCheck, ShieldAlert
@@ -29,6 +29,20 @@ import { isFirebaseConfigured } from './firebase';
 import { validateWorkspaces } from './workspaceValidator';
 import { applyNodeUpdate, collectCloneInstances } from './nodeUpdate';
 import { DEFAULT_NEXT_ID, deriveNextId } from './cardId';
+import {
+  NEW_CARD_TITLE,
+  NEW_CARD_CONTENT,
+  UNFOCUSED_NEW_CARD_TITLE,
+  isViewportMeasurable,
+  centrePlacement,
+  offscreenPlacement,
+  ghostScreenSize,
+  titleKeyIntent,
+  TITLE_KEY_INTENT,
+  shouldAutoFocusNewCard,
+  titleEditKey,
+  descriptionEditKey,
+} from './ghostPlacement';
 import { auditProjectIds, summarizeAudit, SEVERITY } from './idAudit';
 import { snapshotBelongsToProject } from './history';
 import {
@@ -725,6 +739,31 @@ export default function WorkflowApp() {
   const [showMiniMap, setShowMiniMap] = useState(false);
   const [miniMapOpenedViaShortcut, setMiniMapOpenedViaShortcut] = useState(false);
 
+  // --- Ghost Card (new-card placement guide) ---
+  // A VISUAL-ONLY overlay drawing the rectangle the next N press will fill.
+  // Pressing N has always created a card at the centre of the view; the ghost
+  // just makes that point visible, so a card can be aimed by panning the canvas
+  // instead of dragged into place afterwards.
+  //
+  // It is one boolean and nothing else. There is no ghost node, no id, and no
+  // entry in `workspaces` - which is what keeps it out of the autosave effect,
+  // the Firestore saver, `takeSnapshot`, the MiniMap and the id audit, all of
+  // which read from `workspaces` / `nodes`.
+  //
+  // Deliberately NOT persisted. Every other mode toggle in the app (Arrange,
+  // MiniMap, panels) resets on reload, and starting OFF means a reload never
+  // presents an overlay the user forgot they left on.
+  const [showGhostCard, setShowGhostCard] = useState(false);
+
+  // Consumed once by the title field of a just-created card, to suppress the
+  // second history snapshot its onFocus would otherwise take (addNode already
+  // took one). Two entries for one action makes the first Ctrl+Z look broken.
+  const autoFocusedNodeRef = useRef(null);
+
+  // Set while Tab hands the caret from a card's title to its description, so the
+  // blur from the unmounting title field cannot cancel the handover.
+  const titleHandoffRef = useRef(null);
+
   // --- Focus Mode (Immersive Canvas) States ---
   // View-route-only presentation feature. `isFocusMode` hides ALL application
   // UI so only the canvas + its objects remain. `focusUsedFullscreenRef` records
@@ -1001,6 +1040,19 @@ export default function WorkflowApp() {
     (node) => getNodeDimensions(node, { includeContent: isNodeDescriptionVisible(node.id) }),
     [getNodeDimensions, isNodeDescriptionVisible]
   );
+
+  // --- Ghost Card Geometry ---
+  // The size of the card the next N press will create, measured with the SAME
+  // getNodeDimensions the real card is drawn with, so the ghost cannot promise a
+  // rectangle the card will not fill. The title mirrors addNode's choice: blank
+  // when the card will open for typing, labelled otherwise.
+  const ghostCardSize = useMemo(() => {
+    const dims = getNodeDimensions({
+      title: editMode ? NEW_CARD_TITLE : UNFOCUSED_NEW_CARD_TITLE,
+      content: NEW_CARD_CONTENT,
+    });
+    return ghostScreenSize({ transform, cardWidth: dims.width, cardHeight: dims.height });
+  }, [getNodeDimensions, editMode, transform]);
 
   // --- Zoom Helpers ---
   const handleZoom = useCallback((delta) => {
@@ -3833,6 +3885,20 @@ export default function WorkflowApp() {
     return () => window.removeEventListener('keydown', handleMiniMapKey);
   }, []);
 
+  // --- G key toggles the Ghost Card placement guide ---
+  useEffect(() => {
+    const handleGhostCardKey = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      if (e.key === 'g' || e.key === 'G') {
+        e.preventDefault();
+        setShowGhostCard(prev => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleGhostCardKey);
+    return () => window.removeEventListener('keydown', handleGhostCardKey);
+  }, []);
+
   // --- F key focuses (centers + resets zoom) the selected card ---
   useEffect(() => {
     const handleFocusKey = (e) => {
@@ -4240,7 +4306,9 @@ export default function WorkflowApp() {
       if (e.key === 'n' || e.key === 'N') {
         if (isPreviewMode) return;
         e.preventDefault();
-        addNodeRef.current();
+        // Same creation call as before; `focusTitle` only asks for the caret to
+        // land in the new card's title so the user can type straight away.
+        addNodeRef.current(undefined, undefined, null, { focusTitle: true });
       }
     };
     window.addEventListener('keydown', handleNewCardKey);
@@ -6376,32 +6444,59 @@ export default function WorkflowApp() {
     }
   };
 
-  const addNode = (clientX, clientY, targetGroupId = null) => {
+  /**
+   * The one and only card-creation path. The Ghost Card does NOT add a second
+   * one - it only draws where this function is about to place a card.
+   *
+   * `options.focusTitle` asks for the card to open its title for immediate
+   * typing. Only the N shortcut passes it; the button paths (group "Add card",
+   * the More menu, "Add First Card", right-click "Add Card Here") are unchanged.
+   */
+  const addNode = (clientX, clientY, targetGroupId = null, options = {}) => {
     if (isPreviewMode) return;
     if (!workspaceRef.current) return;
     takeSnapshot();
     const rect = workspaceRef.current.getBoundingClientRect();
-    let targetX, targetY;
 
+    // A card about to be typed into starts with an empty title, because
+    // autoFocus puts the caret at offset 0 and the first keystroke would
+    // otherwise land in front of the 'New Card' text. Arrange mode never opens
+    // a text field, so a card created there keeps the visible label.
+    const focusTitle = options.focusTitle === true && shouldAutoFocusNewCard({ editMode });
+    const title = focusTitle ? NEW_CARD_TITLE : UNFOCUSED_NEW_CARD_TITLE;
+
+    // Size of the card as it will actually be drawn. Centring against the real
+    // size is what lets the ghost draw a truthful rectangle; the old hardcoded
+    // 150/50 offset assumed a 300x100 card and placed cards off-centre.
+    const dims = getNodeDimensions({ title, content: NEW_CARD_CONTENT });
+
+    let targetX, targetY;
     if (clientX !== undefined && clientY !== undefined) {
       targetX = (clientX - rect.left - transform.x) / transform.scale;
       targetY = (clientY - rect.top - transform.y) / transform.scale;
-    } else if (rect.width > 0 && rect.height > 0) {
-      targetX = (rect.width / 2 - transform.x) / transform.scale - 150;
-      targetY = (rect.height / 2 - transform.y) / transform.scale - 50;
+    } else if (isViewportMeasurable(rect.width, rect.height)) {
+      const placement = centrePlacement({
+        viewportWidth: rect.width,
+        viewportHeight: rect.height,
+        transform,
+        cardWidth: dims.width,
+        cardHeight: dims.height,
+      });
+      targetX = placement.x;
+      targetY = placement.y;
     } else {
-      // Canvas not visible, place at a default position relative to existing nodes
-      const existingNodes = activeWs?.nodes || [];
-      const maxX = existingNodes.length > 0 ? Math.max(...existingNodes.map(n => n.x)) + 320 : 200;
-      targetX = maxX;
-      targetY = 200;
+      // Canvas not visible (the Outline/Backlog view is showing), so there is no
+      // centre to aim at: fall in beside the rightmost existing card.
+      const fallback = offscreenPlacement(activeWs?.nodes || []);
+      targetX = fallback.x;
+      targetY = fallback.y;
     }
 
     const newNode = {
       id: allocateCardId(),
       workspaceId: activeTab,
       x: targetX, y: targetY,
-      title: 'New Card', content: '', theme: 'blue',
+      title, content: NEW_CARD_CONTENT, theme: 'blue',
       groupId: targetGroupId, cloneSourceId: null
     };
     
@@ -6412,6 +6507,13 @@ export default function WorkflowApp() {
         groups: computeLayout(ws.groups, updatedNodes)
       };
     });
+
+    if (focusTitle) {
+      // Marks the snapshot already taken above as covering this card's first
+      // edit, so the title's onFocus does not take a second one.
+      autoFocusedNodeRef.current = newNode.id;
+      setEditingTextNode(titleEditKey(newNode.id));
+    }
   };
 
   const addNodeRef = useRef(addNode);
@@ -8890,10 +8992,49 @@ export default function WorkflowApp() {
                       value={node.title || ''}
                       placeholder="Enter Title..."
                       rows={1}
-                      onFocus={() => takeSnapshot()}
+                      onFocus={() => {
+                        // A card just created by N was already snapshotted inside
+                        // addNode. Taking another one here would put two entries
+                        // in the history for a single action, so the first Ctrl+Z
+                        // would appear to do nothing. Consumed once.
+                        if (autoFocusedNodeRef.current === node.id) {
+                          autoFocusedNodeRef.current = null;
+                          return;
+                        }
+                        takeSnapshot();
+                      }}
                       onChange={(e) => updateNode(node.id, { title: e.target.value })}
-                      onBlur={() => setEditingTextNode(null)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setEditingTextNode(null); } }}
+                      onBlur={() => {
+                        // While Tab is handing the caret to the description, this
+                        // textarea unmounts. Clearing editingTextNode here would
+                        // undo the handover before the description ever opens.
+                        if (titleHandoffRef.current === node.id) return;
+                        setEditingTextNode(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.preventDefault();
+                          setEditingTextNode(null);
+                          return;
+                        }
+                        const intent = titleKeyIntent(e.key, { shiftKey: e.shiftKey, descriptionVisible });
+                        if (intent === TITLE_KEY_INTENT.COMMIT) {
+                          e.preventDefault();
+                          setEditingTextNode(null);
+                        } else if (intent === TITLE_KEY_INTENT.TO_DESCRIPTION) {
+                          e.preventDefault();
+                          titleHandoffRef.current = node.id;
+                          // Matches the snapshot the description's click handler
+                          // takes, so title and description remain separate
+                          // undo steps however you got into them.
+                          takeSnapshot();
+                          setEditingTextNode(descriptionEditKey(node.id));
+                          // Released on the next tick. Any blur caused by the
+                          // unmount has fired by then, so the guard cannot leak
+                          // into a later edit of the same card.
+                          setTimeout(() => { titleHandoffRef.current = null; }, 0);
+                        }
+                      }}
                       onPointerDown={(e) => e.stopPropagation()}
                     />
                   ) : (
@@ -8919,7 +9060,13 @@ export default function WorkflowApp() {
                           className="w-full h-full min-h-[2rem] bg-transparent resize-none focus:outline-none text-slate-600 text-xs leading-relaxed placeholder-slate-400 custom-scrollbar" 
                           value={node.content || ''} 
                           onChange={(e) => updateNode(node.id, { content: e.target.value })} 
-                          placeholder="Write notes or details..." 
+                          placeholder="Write notes or details..."
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') {
+                              e.preventDefault();
+                              setEditingTextNode(null);
+                            }
+                          }}
                         />
                       ) : (
                         <div 
@@ -9125,6 +9272,29 @@ export default function WorkflowApp() {
             )}
           </div>
 
+          {/* --- Ghost Card: where the next N press will put a card ---
+              Visual only: no id, no node record, nothing in `workspaces`, so it
+              is invisible to autosave, Firestore, undo/redo, the MiniMap and the
+              id audit. It cannot be selected, dragged or connected either -
+              pointer-events-none means it is not a hit target at all.
+
+              Anchored to the centre of the canvas rather than parented to the
+              transformed layer, because "the centre of the viewport" is simply
+              50%/50% - no pan arithmetic, and no getBoundingClientRect() read
+              during render that could go stale on a window resize. Only its size
+              follows zoom, which is what makes it grow and shrink like a real
+              card while staying nailed to the centre as the canvas pans beneath. */}
+          {showGhostCard && !isPreviewMode && (
+            <div
+              className="absolute left-1/2 top-1/2 z-[45] pointer-events-none rounded-xl bg-indigo-400/10"
+              style={{
+                width: ghostCardSize.width,
+                height: ghostCardSize.height,
+                transform: 'translate(-50%, -50%)',
+              }}
+            />
+          )}
+
 
           {/* --- Mini Map Panel --- */}
           <MiniMap
@@ -9210,6 +9380,13 @@ export default function WorkflowApp() {
                 title={isArrangeMode ? 'Switch to Full Edit (M)' : 'Switch to Arrange (M)'}
               >
                 {isArrangeMode ? <MousePointer className="w-4 h-4 sm:w-5 sm:h-5" /> : <Pencil className="w-4 h-4 sm:w-5 sm:h-5" />}
+              </button>
+              <button
+                onClick={() => setShowGhostCard(prev => !prev)}
+                className={`p-1.5 sm:p-2 rounded-md transition-colors ${showGhostCard ? 'bg-emerald-50 text-emerald-600' : 'text-slate-600 hover:bg-slate-100'}`}
+                title={showGhostCard ? 'Hide the new-card placement guide (G)' : 'Show where the next new card will land (G)'}
+              >
+                <Crosshair className="w-4 h-4 sm:w-5 sm:h-5" />
               </button>
               <div className="h-px w-5 bg-slate-200 my-0.5" />
               {/* The retired Preview toggle used to be the eye icon here. */}
