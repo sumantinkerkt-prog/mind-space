@@ -31,7 +31,7 @@ and it is not part of your project data. Section 5 is how you check that.
 | Word | What it means |
 |---|---|
 | **the canvas** | The main area where cards live. |
-| **the Ghost button** | A new button in the top bar labelled **Ghost**, with a crosshair icon. It turns green when the ghost is on. |
+| **the Ghost button** | A button in the bottom-right floating toolbar with a crosshair icon. It turns green when the ghost is on. You can also press **G**. |
 | **the chip** | The small badge in the top bar that says **Saved**, **Syncing…** or **Unsaved changes**. |
 | **the Console** | A box where you can paste a line of text and press Enter. Press **F12**, then click **Console**. |
 
@@ -40,12 +40,11 @@ and it is not part of your project data. Section 5 is how you check that.
 ## 3. The main thing to test
 
 1. Open the app in an editor tab and go to a workspace with some cards.
-2. Click **Ghost** in the top bar (or press **G**). A dashed outline appears in
-    the middle of the screen.
-3. Drag the canvas around. **The outline must not move.** It stays in the middle
-    of the screen while your cards slide underneath it.
-4. Zoom in and out with the mouse wheel. **The outline must grow and shrink with
-    your cards**, staying the same size relative to them.
+2. Press **G**. A faint shaded rectangle appears in the middle of the screen.
+3. Drag the canvas around. **The rectangle must not move.** It stays in the
+    middle of the screen while your cards slide underneath it.
+4. Zoom in and out with the mouse wheel. **The rectangle must grow and shrink
+    with your cards**, staying the same size relative to them.
 5. Pan until the outline sits over an empty patch of canvas where you want a card.
 6. Press **N**.
 
@@ -77,14 +76,13 @@ then **N**. So the rhythm is:
 2. Press **Tab** instead of Enter. The cursor should move down into the
     description of the same card.
 3. Type a description. It should appear on the card.
-4. Click on empty canvas to finish.
+4. Press **Escape** to leave the description. The card keeps both title and
+    description.
 
 Check the card kept both the title and the description.
 
-**Known gap, and it is not new:** there is no key that gets you *out* of the
-description — you click elsewhere to finish, exactly as you always have when
-clicking into a description. Tell me if you want Escape to do it and I will add
-it as a separate change.
+**Escape exits both fields.** If you press Escape while in the title, it commits
+and leaves. If you press Escape while in the description, same thing.
 
 Also check **Shift+Tab** in the title still moves focus backwards the way your
 browser normally does. It should not jump to the description.
@@ -114,11 +112,11 @@ real card would be a data problem.
 Then, in the Console, paste this and press Enter:
 
 ```
-Object.keys(JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k => k.includes('workspace')))) || {})
+JSON.stringify(JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k => k.includes('workspace')))), null, 2).includes('ghost')
 ```
 
-It prints the parts of a saved workspace. There must be **no mention of a ghost**
-anywhere in it.
+This prints `false`. If it ever prints `true`, something wrote the ghost to
+storage and that is a bug.
 
 ---
 
